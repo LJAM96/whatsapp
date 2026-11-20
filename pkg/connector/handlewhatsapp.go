@@ -95,8 +95,10 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 		success = wa.handleWAUndecryptableMessage(ctx, evt)
 
 	case *events.CallOffer:
+		success = wa.handleWACallStart(ctx, evt.GroupJID, evt.CallCreator, evt.CallCreatorAlt, evt.CallID, "", evt.Timestamp)
 		wa.trackCallOffer(ctx, &evt.BasicCallMeta, callTypeFromOfferData(evt.Data))
 	case *events.CallOfferNotice:
+		success = wa.handleWACallStart(ctx, evt.GroupJID, evt.CallCreator, evt.CallCreatorAlt, evt.CallID, evt.Type, evt.Timestamp)
 		wa.trackCallOffer(ctx, &evt.BasicCallMeta, callTypeFromMedia(evt.Media))
 	case *events.CallAccept:
 		wa.updateTrackedCall(&evt.BasicCallMeta, true)
@@ -637,6 +639,74 @@ func (wa *WhatsAppClient) handleWALogout(ctx context.Context, reason events.Conn
 
 const callEventMaxAge = 15 * time.Minute
 
+// shouldSendCallStartNotice reports whether the immediate incoming-call notice
+// should be sent. It is gated solely by call_start_notices.
+func shouldSendCallStartNotice(config *Config, ts time.Time) bool {
+	return config.CallStartNotices && time.Since(ts) <= callEventMaxAge
+}
+
+// shouldTrackCallHistory reports whether a call offer should be remembered so
+// that a finished-call notice can be sent later. It is gated solely by
+// call_history_notices, independently of call_start_notices.
+func shouldTrackCallHistory(config *Config, meta *types.BasicCallMeta) bool {
+	return config.CallHistoryNotices && meta.CallID != "" && time.Since(meta.Timestamp) <= callEventMaxAge
+}
+
+func (wa *WhatsAppClient) handleWACallStart(ctx context.Context, group, sender, senderAlt types.JID, id, callType string, ts time.Time) bool {
+	if !shouldSendCallStartNotice(&wa.Main.Config, ts) {
+		return true
+	}
+	if sender.Server == types.DefaultUserServer && senderAlt.IsEmpty() {
+		senderAlt, _ = wa.GetStore().LIDs.GetLIDForPN(ctx, sender)
+	}
+	if sender.Server == types.DefaultUserServer && senderAlt.Server == types.HiddenUserServer {
+		wa.UserLogin.Log.Debug().
+			Stringer("lid", senderAlt).
+			Stringer("pn", sender).
+			Str("call_id", id).
+			Msg("Forced phone number caller to LID in incoming call")
+		sender, senderAlt = senderAlt, sender
+	}
+	chat := group
+	if chat.IsEmpty() {
+		chat = sender
+	}
+	return wa.UserLogin.QueueRemoteEvent(&simplevent.Message[string]{
+		EventMeta: simplevent.EventMeta{
+			Type:         bridgev2.RemoteEventMessage,
+			LogContext:   nil,
+			PortalKey:    wa.makeWAPortalKey(chat),
+			Sender:       wa.makeEventSender(ctx, sender),
+			CreatePortal: true,
+			Timestamp:    ts,
+			StreamOrder:  ts.Unix(),
+		},
+		Data:               callType,
+		ID:                 waid.MakeFakeMessageID(chat, sender, "call-"+id),
+		ConvertMessageFunc: convertCallStart,
+	}).Success
+}
+
+func convertCallStart(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, callType string) (*bridgev2.ConvertedMessage, error) {
+	text := "Incoming call. Use the WhatsApp app to answer."
+	if callType != "" {
+		text = fmt.Sprintf("Incoming %s call. Use the WhatsApp app to answer.", callType)
+	}
+	return &bridgev2.ConvertedMessage{
+		Parts: []*bridgev2.ConvertedMessagePart{{
+			Type: event.EventMessage,
+			Content: &event.MessageEventContent{
+				MsgType: event.MsgText,
+				Body:    text,
+				BeeperActionMessage: &event.BeeperActionMessage{
+					Type:     event.BeeperActionMessageCall,
+					CallType: event.BeeperActionMessageCallType(callType),
+				},
+			},
+		}},
+	}, nil
+}
+
 // trackedCall holds the details from a call offer that are needed to write the
 // notice once the call finishes. Accept/reject/terminate events only carry the
 // call ID, so they have to be correlated with the offer by that ID.
@@ -692,9 +762,9 @@ func callTypeFromMedia(media string) event.BeeperActionMessageCallType {
 }
 
 // trackCallOffer remembers a call so its final event can produce one notice.
-// The offer itself intentionally does not create a message.
+// The immediate incoming-call notice is sent separately by handleWACallStart.
 func (wa *WhatsAppClient) trackCallOffer(ctx context.Context, meta *types.BasicCallMeta, callType event.BeeperActionMessageCallType) {
-	if !wa.Main.Config.CallStartNotices || meta.CallID == "" || time.Since(meta.Timestamp) > callEventMaxAge {
+	if !shouldTrackCallHistory(&wa.Main.Config, meta) {
 		return
 	}
 	sender, senderAlt := meta.CallCreator, meta.CallCreatorAlt

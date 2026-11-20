@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/util/exsync"
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/types"
 	"maunium.net/go/mautrix/event"
@@ -274,6 +275,121 @@ func TestIsDeclinedCallReason(t *testing.T) {
 		t.Run(tt.reason, func(t *testing.T) {
 			if got := isDeclinedCallReason(tt.reason); got != tt.want {
 				t.Errorf("isDeclinedCallReason(%q) = %v, want %v", tt.reason, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConvertCallStart(t *testing.T) {
+	tests := []struct {
+		name     string
+		callType string
+		wantBody string
+	}{
+		{
+			name:     "voice",
+			callType: "",
+			wantBody: "Incoming call. Use the WhatsApp app to answer.",
+		},
+		{
+			name:     "audio call type",
+			callType: "audio",
+			wantBody: "Incoming audio call. Use the WhatsApp app to answer.",
+		},
+		{
+			name:     "video call type",
+			callType: "video",
+			wantBody: "Incoming video call. Use the WhatsApp app to answer.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			converted, err := convertCallStart(context.Background(), nil, nil, tt.callType)
+			if err != nil {
+				t.Fatalf("convertCallStart() error: %v", err)
+			}
+			if len(converted.Parts) != 1 {
+				t.Fatalf("got %d parts, want 1", len(converted.Parts))
+			}
+			content := converted.Parts[0].Content
+			if content.MsgType != event.MsgText {
+				t.Errorf("msgtype = %q, want %q", content.MsgType, event.MsgText)
+			}
+			if content.Body != tt.wantBody {
+				t.Errorf("body = %q, want %q", content.Body, tt.wantBody)
+			}
+			if content.BeeperActionMessage == nil || content.BeeperActionMessage.Type != event.BeeperActionMessageCall {
+				t.Fatalf("unexpected action message: %+v", content.BeeperActionMessage)
+			}
+			if got := content.BeeperActionMessage.CallType; got != event.BeeperActionMessageCallType(tt.callType) {
+				t.Errorf("call type = %q, want %q", got, tt.callType)
+			}
+		})
+	}
+}
+
+func TestCallNoticeConfigGates(t *testing.T) {
+	recent := time.Now().Add(-time.Second)
+	old := time.Now().Add(-2 * callEventMaxAge)
+	tests := []struct {
+		name           string
+		startNotices   bool
+		historyNotices bool
+		ts             time.Time
+		wantStart      bool
+		wantHistory    bool
+	}{
+		{"both disabled", false, false, recent, false, false},
+		{"only start notices", true, false, recent, true, false},
+		{"only history notices", false, true, recent, false, true},
+		{"both enabled", true, true, recent, true, true},
+		{"stale calls are gated", true, true, old, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{CallStartNotices: tt.startNotices, CallHistoryNotices: tt.historyNotices}
+			if got := shouldSendCallStartNotice(cfg, tt.ts); got != tt.wantStart {
+				t.Errorf("shouldSendCallStartNotice() = %v, want %v", got, tt.wantStart)
+			}
+			meta := &types.BasicCallMeta{CallID: "CALL-1", Timestamp: tt.ts}
+			if got := shouldTrackCallHistory(cfg, meta); got != tt.wantHistory {
+				t.Errorf("shouldTrackCallHistory() = %v, want %v", got, tt.wantHistory)
+			}
+		})
+	}
+}
+
+func TestTrackCallOfferFollowsHistoryGateIndependently(t *testing.T) {
+	meta := &types.BasicCallMeta{
+		CallID:      "CALL-1",
+		CallCreator: types.NewJID("lid-user", types.HiddenUserServer),
+		Timestamp:   time.Now(),
+	}
+	tests := []struct {
+		name           string
+		startNotices   bool
+		historyNotices bool
+		wantTracked    bool
+	}{
+		{"history on, start off", false, true, true},
+		{"history on, start on", true, true, true},
+		{"history off, start on", true, false, false},
+		{"both off", false, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wa := &WhatsAppClient{
+				Main:            &WhatsAppConnector{Config: Config{CallStartNotices: tt.startNotices, CallHistoryNotices: tt.historyNotices}},
+				callNotices:     make(map[string]*trackedCall),
+				previousOwnLIDs: exsync.NewSet[types.JID](),
+			}
+			wa.trackCallOffer(context.Background(), meta, event.BeeperActionMessageCallTypeVoice)
+			tracked := wa.callNotices[meta.CallID]
+			if tt.wantTracked && tracked == nil {
+				t.Fatal("call offer was not tracked")
+			}
+			if !tt.wantTracked && tracked != nil {
+				t.Fatalf("call offer was tracked despite call_history_notices being off: %+v", tracked)
 			}
 		})
 	}

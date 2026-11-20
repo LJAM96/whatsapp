@@ -202,6 +202,101 @@ func (m *mockMatrixAPI) SendMessage(_ context.Context, _ id.RoomID, eventType ev
 	return &mautrix.RespSendEvent{EventID: id.EventID("$beacon")}, nil
 }
 
+func TestLiveLocationShareActive(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name string
+		info BeaconInfoContent
+		want bool
+	}{
+		{name: "active share", info: BeaconInfoContent{Live: true, Timeout: 60_000, TS: now.UnixMilli()}, want: true},
+		{name: "expired share", info: BeaconInfoContent{Live: true, Timeout: 1_000, TS: now.Add(-time.Minute).UnixMilli()}},
+		{name: "stopped share", info: BeaconInfoContent{Live: false, Timeout: 60_000, TS: now.UnixMilli()}},
+		{name: "missing timeout", info: BeaconInfoContent{Live: true, TS: now.UnixMilli()}},
+		{name: "missing ts", info: BeaconInfoContent{Live: true, Timeout: 60_000}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := liveLocationShareActive(tt.info); got != tt.want {
+				t.Errorf("liveLocationShareActive() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetLiveLocationShareExpired(t *testing.T) {
+	const (
+		roomID  = id.RoomID("!room:example.org")
+		ghostID = id.UserID("@wa_ghost:example.org")
+	)
+	now := time.Now()
+	tests := []struct {
+		name      string
+		info      BeaconInfoContent
+		wantReuse bool
+	}{
+		{name: "active cached share is reused", info: *buildBeaconInfoContent(true, now, "test"), wantReuse: true},
+		{name: "expired cached share is dropped", info: *buildBeaconInfoContent(true, now.Add(-2*time.Hour), "test")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &mockMatrixAPI{mxid: ghostID}
+			mc := &MessageConverter{liveLocations: make(map[string]*liveLocationShare)}
+			portal := &bridgev2.Portal{Portal: &database.Portal{MXID: roomID}}
+			key := liveLocationShareKey(portal, api)
+			mc.liveLocations[key] = &liveLocationShare{InfoEventID: "$beacon-info", Info: tt.info}
+
+			share := mc.getLiveLocationShare(context.Background(), portal, api)
+			if tt.wantReuse {
+				if share == nil || share.InfoEventID != "$beacon-info" {
+					t.Errorf("getLiveLocationShare() = %+v, want cached share", share)
+				}
+				return
+			}
+			if share != nil {
+				t.Errorf("getLiveLocationShare() = %+v, want nil for expired share", share)
+			}
+			if _, ok := mc.liveLocations[key]; ok {
+				t.Error("expired share was not removed from the cache")
+			}
+		})
+	}
+}
+
+func TestConvertLiveLocationMessageExpiredShare(t *testing.T) {
+	const (
+		roomID  = id.RoomID("!room:example.org")
+		ghostID = id.UserID("@wa_ghost:example.org")
+	)
+	lat, long := 51.5, -0.12
+	msg := &waE2E.LiveLocationMessage{DegreesLatitude: &lat, DegreesLongitude: &long}
+	info := &types.MessageInfo{ID: "msg1", Timestamp: time.Now()}
+	api := &mockMatrixAPI{mxid: ghostID}
+	mc := &MessageConverter{
+		Bridge:        &bridgev2.Bridge{Bot: api},
+		liveLocations: make(map[string]*liveLocationShare),
+	}
+	portal := &bridgev2.Portal{Portal: &database.Portal{MXID: roomID}}
+	mc.liveLocations[liveLocationShareKey(portal, api)] = &liveLocationShare{
+		InfoEventID: "$expired-info",
+		Info:        *buildBeaconInfoContent(true, time.Now().Add(-2*time.Hour), "test"),
+	}
+
+	part, _ := mc.convertLiveLocationMessage(context.Background(), portal, api, msg, info, false)
+	if len(api.states) != 1 {
+		t.Fatalf("sent %d state events, want 1 fresh beacon_info", len(api.states))
+	}
+	if !api.states[0].Content.Live || api.states[0].Content.TS != info.Timestamp.UnixMilli() {
+		t.Errorf("fresh beacon_info = %+v, want live share with current ts", api.states[0].Content)
+	}
+	if api.beaconCount != 1 {
+		t.Errorf("sent %d beacons, want 1", api.beaconCount)
+	}
+	if part.DontBridge || part.Content.MsgType != event.MsgLocation {
+		t.Errorf("start part = %+v, want m.location fallback", part)
+	}
+}
+
 func TestConvertLiveLocationMessage(t *testing.T) {
 	const (
 		roomID  = id.RoomID("!room:example.org")
@@ -240,11 +335,12 @@ func TestConvertLiveLocationMessage(t *testing.T) {
 			portal := &bridgev2.Portal{Portal: &database.Portal{MXID: roomID}}
 			ctx := context.Background()
 
-			// Seed an active share for the update and stop cases.
+			// Seed an active share for the update and stop cases. The share must
+			// be recent or getLiveLocationShare correctly treats it as expired.
 			if tt.name == "update after start" || tt.name == "stop" {
 				mc.liveLocations[liveLocationShareKey(portal, api)] = &liveLocationShare{
 					InfoEventID: "$previous-info",
-					Info:        *buildBeaconInfoContent(true, info.Timestamp, "test"),
+					Info:        *buildBeaconInfoContent(true, time.Now(), "test"),
 				}
 			}
 

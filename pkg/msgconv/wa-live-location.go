@@ -18,7 +18,6 @@ package msgconv
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"html"
 	"time"
@@ -31,15 +30,6 @@ import (
 	"maunium.net/go/mautrix/id"
 )
 
-// MSC3489/MSC3672 live location beacons. mautrix-go has no event types for
-// these yet, so the unstable (MSC) identifiers are defined here. Clients that
-// implement live location today read the unstable names, so using them avoids
-// relying on identifiers that have not been ratified into the spec.
-var (
-	EventBeaconInfo = event.Type{Type: "org.matrix.msc3672.beacon_info", Class: event.StateEventType}
-	EventBeacon     = event.Type{Type: "org.matrix.msc3672.beacon", Class: event.MessageEventType}
-)
-
 const (
 	// whatsmeow does not expose the share duration from the WhatsApp <enc>
 	// element, so use the most common WhatsApp share duration as a fallback.
@@ -48,56 +38,21 @@ const (
 	liveLocationTimeout = time.Hour
 )
 
-// BeaconInfoContent is the content of an org.matrix.msc3672.beacon_info state
-// event. The state key is the MXID of the user sharing the location.
-type BeaconInfoContent struct {
-	Live        bool        `json:"live"`
-	Timeout     int64       `json:"timeout"`
-	TS          int64       `json:"org.matrix.msc3488.ts"`
-	Description string      `json:"description,omitempty"`
-	Asset       BeaconAsset `json:"org.matrix.msc3488.asset"`
-}
-
-// BeaconAsset describes what is being tracked. A person sharing their own
-// location is always an m.self asset (MSC3488).
-type BeaconAsset struct {
-	Type string `json:"type"`
-}
-
-// BeaconLocation is the location carried by an m.beacon event.
-type BeaconLocation struct {
-	URI         string `json:"uri"`
-	Description string `json:"description,omitempty"`
-}
-
-// BeaconRelatesTo relates a beacon to its beacon_info state event.
-type BeaconRelatesTo struct {
-	RelType string `json:"rel_type"`
-	EventID string `json:"event_id"`
-}
-
-// BeaconContent is the content of an org.matrix.msc3672.beacon timeline event.
-type BeaconContent struct {
-	RelatesTo BeaconRelatesTo `json:"m.relates_to"`
-	Location  BeaconLocation  `json:"org.matrix.msc3488.location"`
-	TS        int64           `json:"org.matrix.msc3488.ts"`
-}
-
-func buildBeaconInfoContent(live bool, ts time.Time, description string) *BeaconInfoContent {
-	return &BeaconInfoContent{
+func buildBeaconInfoContent(live bool, ts time.Time, description string) *event.BeaconInfoEventContent {
+	return &event.BeaconInfoEventContent{
 		Live:        live,
 		Timeout:     liveLocationTimeout.Milliseconds(),
-		TS:          ts.UnixMilli(),
+		Timestamp:   ts.UnixMilli(),
 		Description: description,
-		Asset:       BeaconAsset{Type: "m.self"},
+		Asset:       &event.BeaconAsset{Type: event.LocationAssetTypeSelf},
 	}
 }
 
-func buildBeaconContent(infoEventID id.EventID, geoURI string, ts time.Time, description string) *BeaconContent {
-	return &BeaconContent{
-		RelatesTo: BeaconRelatesTo{RelType: "m.reference", EventID: infoEventID.String()},
-		Location:  BeaconLocation{URI: geoURI, Description: description},
-		TS:        ts.UnixMilli(),
+func buildBeaconContent(infoEventID id.EventID, geoURI string, ts time.Time, description string) *event.BeaconEventContent {
+	return &event.BeaconEventContent{
+		RelatesTo: event.RelatesTo{Type: event.RelReference, EventID: infoEventID},
+		Location:  &event.BeaconLocation{URI: geoURI, Description: description},
+		Timestamp: ts.UnixMilli(),
 	}
 }
 
@@ -123,7 +78,7 @@ func liveLocationDescription(msg *waE2E.LiveLocationMessage) string {
 // beacon_info event sent when sharing started.
 type liveLocationShare struct {
 	InfoEventID id.EventID
-	Info        BeaconInfoContent
+	Info        event.BeaconInfoEventContent
 }
 
 func liveLocationShareKey(portal *bridgev2.Portal, intent bridgev2.MatrixAPI) string {
@@ -138,22 +93,19 @@ func recoverLiveLocationShare(ctx context.Context, portal *bridgev2.Portal, inte
 	if !ok {
 		return nil
 	}
-	stateEvt, err := stateAPI.GetStateEvent(ctx, portal.MXID, EventBeaconInfo, intent.GetMXID().String())
+	stateEvt, err := stateAPI.GetStateEvent(ctx, portal.MXID, event.StateUnstableBeaconInfo, intent.GetMXID().String())
 	if err != nil || stateEvt == nil {
 		return nil
 	}
-	raw, err := json.Marshal(stateEvt.Content.Raw)
-	if err != nil {
+	_ = stateEvt.Content.ParseRaw(event.StateUnstableBeaconInfo)
+	info := stateEvt.Content.AsBeaconInfo()
+	if !info.Live || info.Timeout <= 0 || info.GetTimestamp() <= 0 {
 		return nil
 	}
-	var info BeaconInfoContent
-	if err = json.Unmarshal(raw, &info); err != nil || !info.Live || info.Timeout <= 0 || info.TS <= 0 {
+	if expiresAt := time.UnixMilli(info.GetTimestamp()).Add(time.Duration(info.Timeout) * time.Millisecond); !time.Now().Before(expiresAt) {
 		return nil
 	}
-	if expiresAt := time.UnixMilli(info.TS).Add(time.Duration(info.Timeout) * time.Millisecond); !time.Now().Before(expiresAt) {
-		return nil
-	}
-	return &liveLocationShare{InfoEventID: stateEvt.ID, Info: info}
+	return &liveLocationShare{InfoEventID: stateEvt.ID, Info: *info}
 }
 
 func (mc *MessageConverter) getLiveLocationShare(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) *liveLocationShare {
@@ -176,7 +128,7 @@ func (mc *MessageConverter) getLiveLocationShare(ctx context.Context, portal *br
 func (mc *MessageConverter) sendLiveLocationBeacon(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, msg *waE2E.LiveLocationMessage, info *types.MessageInfo, share *liveLocationShare) {
 	geoURI := liveLocationGeoURI(msg.GetDegreesLatitude(), msg.GetDegreesLongitude(), msg.GetAccuracyInMeters())
 	content := buildBeaconContent(share.InfoEventID, geoURI, info.Timestamp, share.Info.Description)
-	_, err := intent.SendMessage(ctx, portal.MXID, EventBeacon, &event.Content{Parsed: content}, &bridgev2.MatrixSendExtra{
+	_, err := intent.SendMessage(ctx, portal.MXID, event.EventUnstableBeacon, &event.Content{Parsed: content}, &bridgev2.MatrixSendExtra{
 		Timestamp:     info.Timestamp,
 		TransactionID: fmt.Sprintf("wa-live-location-%s-%d", info.ID, msg.GetSequenceNumber()),
 	})
@@ -189,7 +141,7 @@ func (mc *MessageConverter) startLiveLocationBeacon(ctx context.Context, portal 
 	content := buildBeaconInfoContent(true, info.Timestamp, liveLocationDescription(msg))
 	// Ghosts usually lack the power level to write state. MSC3672 identifies
 	// the sharer by the state key, so the bridge bot can safely write it.
-	resp, err := mc.Bridge.Bot.SendState(ctx, portal.MXID, EventBeaconInfo, intent.GetMXID().String(), &event.Content{Parsed: content}, info.Timestamp)
+	resp, err := mc.Bridge.Bot.SendState(ctx, portal.MXID, event.StateUnstableBeaconInfo, intent.GetMXID().String(), &event.Content{Parsed: content}, info.Timestamp)
 	if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to send live location beacon_info state event")
 		return
@@ -217,7 +169,7 @@ func (mc *MessageConverter) stopLiveLocationBeacon(ctx context.Context, portal *
 	}
 	stopped := share.Info
 	stopped.Live = false
-	_, err := mc.Bridge.Bot.SendState(ctx, portal.MXID, EventBeaconInfo, intent.GetMXID().String(), &event.Content{Parsed: &stopped}, time.Now())
+	_, err := mc.Bridge.Bot.SendState(ctx, portal.MXID, event.StateUnstableBeaconInfo, intent.GetMXID().String(), &event.Content{Parsed: &stopped}, time.Now())
 	if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to mark live location beacon_info as stopped")
 	}

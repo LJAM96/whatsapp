@@ -92,7 +92,7 @@ func TestBuildBeaconInfoContent(t *testing.T) {
 			name:        "live share",
 			live:        true,
 			description: "The Matthew Tracker",
-			expected:    `{"live":true,"timeout":3600000,"org.matrix.msc3488.ts":1636829458432,"description":"The Matthew Tracker","org.matrix.msc3488.asset":{"type":"m.self"}}`,
+			expected:    `{"description":"The Matthew Tracker","live":true,"timeout":3600000,"org.matrix.msc3488.ts":1636829458432,"org.matrix.msc3488.asset":{"type":"m.self"}}`,
 		},
 		{
 			name:        "stopped share has no description",
@@ -110,8 +110,8 @@ func TestBuildBeaconInfoContent(t *testing.T) {
 			if content.Timeout != 3_600_000 {
 				t.Errorf("Timeout = %d, want 3600000", content.Timeout)
 			}
-			if content.Asset.Type != "m.self" {
-				t.Errorf("Asset.Type = %q, want m.self", content.Asset.Type)
+			if content.GetAsset() == nil || content.GetAsset().Type != event.LocationAssetTypeSelf {
+				t.Errorf("Asset.Type = %v, want m.self", content.GetAsset())
 			}
 			actual, err := json.Marshal(&event.Content{Parsed: content})
 			if err != nil {
@@ -119,6 +119,15 @@ func TestBuildBeaconInfoContent(t *testing.T) {
 			}
 			if string(actual) != tt.expected {
 				t.Errorf("beacon_info JSON = %s, want %s", actual, tt.expected)
+			}
+			var parsed event.Content
+			parsed.VeryRaw = actual
+			if err := parsed.ParseRaw(event.StateUnstableBeaconInfo); err != nil {
+				t.Fatalf("failed to parse beacon_info: %v", err)
+			}
+			info := parsed.AsBeaconInfo()
+			if info.Live != tt.live || info.GetTimestamp() != ts.UnixMilli() {
+				t.Errorf("AsBeaconInfo() = %+v, want live=%v ts=%d", info, tt.live, ts.UnixMilli())
 			}
 		})
 	}
@@ -157,6 +166,15 @@ func TestBuildBeaconContent(t *testing.T) {
 			if string(actual) != tt.expected {
 				t.Errorf("beacon JSON = %s, want %s", actual, tt.expected)
 			}
+			var parsed event.Content
+			parsed.VeryRaw = actual
+			if err := parsed.ParseRaw(event.EventUnstableBeacon); err != nil {
+				t.Fatalf("failed to parse beacon: %v", err)
+			}
+			beacon := parsed.AsBeacon()
+			if beacon.GetTimestamp() != ts.UnixMilli() || beacon.GetLocation().URI != tt.geoURI {
+				t.Errorf("AsBeacon() = %+v, want ts=%d uri=%q", beacon, ts.UnixMilli(), tt.geoURI)
+			}
 		})
 	}
 }
@@ -177,7 +195,7 @@ func TestNoBridgePart(t *testing.T) {
 type recordedState struct {
 	Type     event.Type
 	StateKey string
-	Content  BeaconInfoContent
+	Content  event.BeaconInfoEventContent
 }
 
 type mockMatrixAPI struct {
@@ -190,13 +208,13 @@ type mockMatrixAPI struct {
 func (m *mockMatrixAPI) GetMXID() id.UserID { return m.mxid }
 
 func (m *mockMatrixAPI) SendState(_ context.Context, _ id.RoomID, eventType event.Type, stateKey string, content *event.Content, _ time.Time) (*mautrix.RespSendEvent, error) {
-	info := content.Parsed.(*BeaconInfoContent)
+	info := content.AsBeaconInfo()
 	m.states = append(m.states, recordedState{Type: eventType, StateKey: stateKey, Content: *info})
 	return &mautrix.RespSendEvent{EventID: id.EventID("$beacon-info")}, nil
 }
 
 func (m *mockMatrixAPI) SendMessage(_ context.Context, _ id.RoomID, eventType event.Type, _ *event.Content, _ *bridgev2.MatrixSendExtra) (*mautrix.RespSendEvent, error) {
-	if eventType == EventBeacon {
+	if eventType == event.EventUnstableBeacon {
 		m.beaconCount++
 	}
 	return &mautrix.RespSendEvent{EventID: id.EventID("$beacon")}, nil
@@ -265,8 +283,8 @@ func TestConvertLiveLocationMessage(t *testing.T) {
 				t.Errorf("msgtype = %q, want %q", part.Content.MsgType, tt.expectMsgType)
 			}
 			for _, state := range api.states {
-				if state.Type != EventBeaconInfo {
-					t.Errorf("state event type = %v, want %v", state.Type, EventBeaconInfo)
+				if state.Type != event.StateUnstableBeaconInfo {
+					t.Errorf("state event type = %v, want %v", state.Type, event.StateUnstableBeaconInfo)
 				}
 				if state.StateKey != ghostID.String() {
 					t.Errorf("state key = %q, want %q", state.StateKey, ghostID)

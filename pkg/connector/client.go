@@ -132,6 +132,7 @@ type WhatsAppClient struct {
 	lastPresence       types.Presence
 	presenceSubs       *exsync.Set[types.JID]
 	blocklistLock      sync.Mutex
+	starredLock        sync.Mutex
 
 	callNoticeLock sync.Mutex
 	callNotices    map[string]*trackedCall

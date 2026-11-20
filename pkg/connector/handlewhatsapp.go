@@ -18,6 +18,7 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -33,12 +34,14 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 
+	"go.mau.fi/mautrix-whatsapp/pkg/msgconv"
 	"go.mau.fi/mautrix-whatsapp/pkg/waid"
 )
 
@@ -377,6 +380,9 @@ func (wa *WhatsAppClient) handleWAMessage(ctx context.Context, evt *events.Messa
 			Msg("Ignoring unknown protocol message")
 		return
 	}
+	if evt.Message.GetPinInChatMessage() != nil {
+		return wa.handleWAPinInChat(ctx, evt)
+	}
 
 	dontRenderEdited := false
 	messageAssoc := evt.Message.GetMessageContextInfo().GetMessageAssociation()
@@ -435,6 +441,52 @@ func (wa *WhatsAppClient) handleWAMessage(ctx context.Context, evt *events.Messa
 	}
 
 	return wa.UserLogin.QueueRemoteEvent(wrappedEvt).Success
+}
+
+// handleWAPinInChat mirrors a WhatsApp pin/unpin of a message into the portal's
+// m.room.pinned_events state instead of bridging the pin as a regular message.
+func (wa *WhatsAppClient) handleWAPinInChat(ctx context.Context, evt *events.Message) bool {
+	portal, err := wa.Main.Bridge.GetExistingPortalByKey(ctx, (&MessageInfoWrapper{Info: evt.Info, wa: wa}).GetPortalKey())
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to get portal for pin in chat event")
+		return false
+	} else if portal == nil || portal.MXID == "" {
+		zerolog.Ctx(ctx).Debug().Msg("Ignoring pin in chat event for unbridged portal")
+		return true
+	}
+	targetID := msgconv.KeyToMessageID(ctx, wa.Client, evt.Info.Chat, evt.Info.Sender, evt.Message.GetPinInChatMessage().GetKey())
+	if targetID == "" {
+		zerolog.Ctx(ctx).Warn().Msg("Ignoring pin in chat event with invalid target message key")
+		return true
+	}
+	target, err := wa.Main.Bridge.DB.Message.GetFirstPartByID(ctx, portal.Receiver, targetID)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Str("target_message_id", string(targetID)).Msg("Failed to get pinned message from database")
+		return false
+	} else if target == nil {
+		zerolog.Ctx(ctx).Debug().Str("target_message_id", string(targetID)).Msg("Ignoring pin of unbridged message")
+		return true
+	}
+	mx, ok := wa.Main.Bridge.Matrix.(bridgev2.MatrixConnectorWithArbitraryRoomState)
+	if !ok {
+		zerolog.Ctx(ctx).Warn().Msg("Matrix connector doesn't support fetching state, can't bridge pin in chat event")
+		return true
+	}
+	prevEvt, err := mx.GetStateEvent(ctx, portal.MXID, event.StatePinnedEvents, "")
+	if err != nil && !errors.Is(err, mautrix.MNotFound) {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to get current pinned events")
+		return false
+	}
+	content, changed := msgconv.PinInChatToMatrix(prevEvt, evt.Message, target.MXID, evt.Info.Timestamp)
+	if !changed {
+		return true
+	}
+	_, err = wa.Main.Bridge.Bot.SendState(ctx, portal.MXID, event.StatePinnedEvents, "", content, evt.Info.Timestamp)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to update pinned events")
+		return false
+	}
+	return true
 }
 
 func makeHDMediaReplacementEdit(message *waE2E.Message, parentKey *waCommon.MessageKey) (*waE2E.ProtocolMessage, bool) {

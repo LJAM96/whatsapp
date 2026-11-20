@@ -9,6 +9,7 @@ tool go.mau.fi/util/cmd/maubuild
 require (
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.12.3
+	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/rs/zerolog v1.35.1
 	github.com/tidwall/gjson v1.20.0
 	github.com/yuin/goldmark v1.8.7
@@ -32,7 +33,6 @@ require (
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/mattn/go-sqlite3 v1.14.53 // indirect
 	github.com/petermattis/goid v0.0.0-20261109124353-7cfa343ad0ab // indirect
 	github.com/rogpeppe/go-internal v1.10.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect

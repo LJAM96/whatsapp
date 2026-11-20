@@ -66,10 +66,20 @@ var (
 	_ bridgev2.CustomEventHandlingNetworkAPI = (*WhatsAppClient)(nil)
 )
 
-// GetCustomMatrixEventTypes declares the Weave-specific event types that the
-// Matrix connector should register and forward to HandleMatrixCustomEvent.
+// GetCustomMatrixEventTypes declares the event types that the Matrix connector
+// should register and forward to HandleMatrixCustomEvent. Alongside the
+// Weave-specific control events, this includes the MSC3672 live location
+// events: a state type (beacon_info) and a message type (beacon). The hook
+// takes event.Type values, whose Class already distinguishes state from
+// timeline events, so both can be declared here.
 func (wa *WhatsAppConnector) GetCustomMatrixEventTypes() []event.Type {
-	return []event.Type{ChatSettingsEventType, StarEventType, LabelEventType}
+	return []event.Type{
+		ChatSettingsEventType,
+		StarEventType,
+		LabelEventType,
+		event.StateUnstableBeaconInfo,
+		event.EventUnstableBeacon,
+	}
 }
 
 // HandleMatrixCustomEvent routes declared custom events to their handlers.
@@ -84,6 +94,10 @@ func (wa *WhatsAppClient) HandleMatrixCustomEvent(ctx context.Context, msg *brid
 		return wa.HandleStar(ctx, msg.Portal, msg.Event)
 	case LabelEventType:
 		return wa.HandleLabel(ctx, msg.Portal, msg.Event)
+	case event.StateUnstableBeaconInfo:
+		return wa.HandleMatrixBeaconInfo(ctx, msg.Portal, msg.Event)
+	case event.EventUnstableBeacon:
+		return wa.HandleMatrixBeacon(ctx, msg.Portal, msg.Event)
 	default:
 		return nil
 	}

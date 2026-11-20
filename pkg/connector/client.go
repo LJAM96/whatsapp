@@ -29,6 +29,7 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	waBinary "go.mau.fi/whatsmeow/binary"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waWa6"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
@@ -152,6 +153,10 @@ type WhatsAppClient struct {
 
 	previousOwnLIDs     *exsync.Set[types.JID]
 	previousOwnLIDsLock sync.Mutex
+
+	// sendLiveLocationHook is only set by tests to observe outgoing live
+	// location messages without needing a connected WhatsApp client.
+	sendLiveLocationHook func(ctx context.Context, portal *bridgev2.Portal, msg *waE2E.Message) (types.MessageID, error)
 }
 
 var (

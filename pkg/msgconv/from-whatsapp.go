@@ -224,6 +224,8 @@ func (mc *MessageConverter) ToMatrix(
 		part, contextInfo = mc.convertGroupInviteMessage(ctx, info, waMsg.GroupInviteMessage)
 	case waMsg.MessageHistoryNotice != nil:
 		part, contextInfo = mc.convertMessageHistoryNotice(ctx, info, waMsg.MessageHistoryNotice)
+	case waMsg.CallLogMesssage != nil:
+		part, contextInfo = mc.convertCallLogMessage(ctx, info, waMsg.CallLogMesssage)
 	case waMsg.ProtocolMessage != nil && waMsg.ProtocolMessage.GetType() == waE2E.ProtocolMessage_EPHEMERAL_SETTING:
 		part, contextInfo = mc.convertEphemeralSettingMessage(ctx, waMsg.ProtocolMessage, info.Timestamp, isBackfill)
 	case waMsg.EncCommentMessage != nil:

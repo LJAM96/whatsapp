@@ -41,6 +41,20 @@ import (
 	"go.mau.fi/mautrix-whatsapp/pkg/waid"
 )
 
+// markViewOnce marks a converted media message as view-limited so Matrix clients
+// show the standard "view once" UI and ask the bridge to redact it after opening.
+// WhatsApp view-once media always allows exactly one view.
+func markViewOnce(part *bridgev2.ConvertedMessagePart, isViewOnce, disableViewOnce bool) {
+	if !isViewOnce || disableViewOnce || part == nil || part.Content == nil {
+		return
+	}
+	// Failure notices don't contain media, so there is nothing to view.
+	if part.Content.URL == "" && part.Content.File == nil {
+		return
+	}
+	part.Content.BeeperViewLimited = &event.BeeperViewLimitedMedia{Type: "count", Count: 1}
+}
+
 func (mc *MessageConverter) convertMediaMessage(
 	ctx context.Context,
 	msg MediaMessage,

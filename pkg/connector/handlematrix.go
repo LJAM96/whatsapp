@@ -48,22 +48,23 @@ import (
 )
 
 var (
-	_ bridgev2.TypingHandlingNetworkAPI         = (*WhatsAppClient)(nil)
-	_ bridgev2.EditHandlingNetworkAPI           = (*WhatsAppClient)(nil)
-	_ bridgev2.ReactionHandlingNetworkAPI       = (*WhatsAppClient)(nil)
-	_ bridgev2.RedactionHandlingNetworkAPI      = (*WhatsAppClient)(nil)
-	_ bridgev2.ReadReceiptHandlingNetworkAPI    = (*WhatsAppClient)(nil)
-	_ bridgev2.PollHandlingNetworkAPI           = (*WhatsAppClient)(nil)
-	_ bridgev2.DisappearTimerChangingNetworkAPI = (*WhatsAppClient)(nil)
-	_ bridgev2.MembershipHandlingNetworkAPI     = (*WhatsAppClient)(nil)
-	_ bridgev2.RoomNameHandlingNetworkAPI       = (*WhatsAppClient)(nil)
-	_ bridgev2.RoomTopicHandlingNetworkAPI      = (*WhatsAppClient)(nil)
-	_ bridgev2.RoomAvatarHandlingNetworkAPI     = (*WhatsAppClient)(nil)
-	_ bridgev2.MuteHandlingNetworkAPI           = (*WhatsAppClient)(nil)
-	_ bridgev2.TagHandlingNetworkAPI            = (*WhatsAppClient)(nil)
-	_ bridgev2.MarkedUnreadHandlingNetworkAPI   = (*WhatsAppClient)(nil)
-	_ bridgev2.DeleteChatHandlingNetworkAPI     = (*WhatsAppClient)(nil)
-	_ bridgev2.UserBlockingNetworkAPI           = (*WhatsAppClient)(nil)
+	_ bridgev2.TypingHandlingNetworkAPI           = (*WhatsAppClient)(nil)
+	_ bridgev2.EditHandlingNetworkAPI             = (*WhatsAppClient)(nil)
+	_ bridgev2.ReactionHandlingNetworkAPI         = (*WhatsAppClient)(nil)
+	_ bridgev2.RedactionHandlingNetworkAPI        = (*WhatsAppClient)(nil)
+	_ bridgev2.ReadReceiptHandlingNetworkAPI      = (*WhatsAppClient)(nil)
+	_ bridgev2.ViewLimitedMediaHandlingNetworkAPI = (*WhatsAppClient)(nil)
+	_ bridgev2.PollHandlingNetworkAPI             = (*WhatsAppClient)(nil)
+	_ bridgev2.DisappearTimerChangingNetworkAPI   = (*WhatsAppClient)(nil)
+	_ bridgev2.MembershipHandlingNetworkAPI       = (*WhatsAppClient)(nil)
+	_ bridgev2.RoomNameHandlingNetworkAPI         = (*WhatsAppClient)(nil)
+	_ bridgev2.RoomTopicHandlingNetworkAPI        = (*WhatsAppClient)(nil)
+	_ bridgev2.RoomAvatarHandlingNetworkAPI       = (*WhatsAppClient)(nil)
+	_ bridgev2.MuteHandlingNetworkAPI             = (*WhatsAppClient)(nil)
+	_ bridgev2.TagHandlingNetworkAPI              = (*WhatsAppClient)(nil)
+	_ bridgev2.MarkedUnreadHandlingNetworkAPI     = (*WhatsAppClient)(nil)
+	_ bridgev2.DeleteChatHandlingNetworkAPI       = (*WhatsAppClient)(nil)
+	_ bridgev2.UserBlockingNetworkAPI             = (*WhatsAppClient)(nil)
 )
 
 func (wa *WhatsAppClient) HandleMatrixPollStart(ctx context.Context, msg *bridgev2.MatrixPollStart) (result *bridgev2.MatrixMessageResponse, retErr error) {
@@ -363,6 +364,30 @@ func (wa *WhatsAppClient) HandleMatrixReadReceipt(ctx context.Context, receipt *
 		if err != nil {
 			log.Err(err).Strs("ids", ids).Msg("Failed to mark messages as read")
 		}
+	}
+	return wrapWhatsAppError(err)
+}
+
+func (wa *WhatsAppClient) HandleMatrixViewLimitedMedia(ctx context.Context, msg *bridgev2.MatrixViewLimitedMedia) error {
+	// The media has already been downloaded from WhatsApp and uploaded to Matrix.
+	// There is nothing to revoke on the WhatsApp side: bridgev2 handles the
+	// Matrix-side redaction after this handler returns. Match the native app by
+	// sending a played receipt so the sender sees that the media was opened.
+	parsed, err := waid.ParseMessageID(msg.Message.ID)
+	if err != nil {
+		zerolog.Ctx(ctx).Debug().Err(err).Msg("Failed to parse message ID for view-once receipt")
+		return nil
+	}
+	if parsed.Sender.IsEmpty() || wa.IsOwnJID(parsed.Sender) {
+		return nil
+	}
+	portalJID, err := waid.ParsePortalID(msg.Portal.ID)
+	if err != nil {
+		return fmt.Errorf("failed to parse portal ID: %w", err)
+	}
+	err = wa.Client.MarkRead(ctx, []types.MessageID{parsed.ID}, time.Now(), portalJID, parsed.Sender, types.ReceiptTypePlayed)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to mark view-once media as played")
 	}
 	return wrapWhatsAppError(err)
 }

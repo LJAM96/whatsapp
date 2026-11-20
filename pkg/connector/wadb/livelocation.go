@@ -68,6 +68,17 @@ const (
 		WHERE bridge_id=$1 AND user_login_id=$2 AND portal_id=$3 AND portal_receiver=$4
 		  AND direction=$5 AND matrix_user_id=$6
 	`
+	putLiveLocationSentMessageQuery = `
+		INSERT INTO whatsapp_live_location_sent_message (
+			bridge_id, user_login_id, portal_id, portal_receiver, matrix_user_id, wa_message_id
+		) VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (bridge_id, user_login_id, portal_id, portal_receiver, wa_message_id) DO UPDATE SET
+			matrix_user_id=excluded.matrix_user_id
+	`
+	getLiveLocationSentMessageQuery = `
+		SELECT wa_message_id FROM whatsapp_live_location_sent_message
+		WHERE bridge_id=$1 AND portal_id=$2 AND portal_receiver=$3 AND wa_message_id=$4
+	`
 )
 
 // GetAny returns the stored share without checking expiry.
@@ -116,4 +127,42 @@ func (lls *LiveLocationShare) Scan(row dbutil.Scannable) (*LiveLocationShare, er
 func (lls *LiveLocationShare) sqlVariables() []any {
 	return []any{lls.BridgeID, lls.UserLoginID, lls.PortalKey.ID, lls.PortalKey.Receiver, lls.Direction, lls.MatrixUserID,
 		lls.InfoEventID, lls.Description, lls.Timeout, lls.StartedTS, lls.WAMessageID, lls.Sequence, lls.Expiry}
+}
+
+// LiveLocationSentMessage records one WhatsApp message ID the bridge sent for
+// a Weave-originated live location share. Every start, update and final stop
+// gets its own row, and rows are kept after the share ends so a late echo of
+// any message in the share is still recognised as ours.
+type LiveLocationSentMessage struct {
+	WAMessageID string
+}
+
+func (llsm *LiveLocationSentMessage) Scan(row dbutil.Scannable) (*LiveLocationSentMessage, error) {
+	err := row.Scan(&llsm.WAMessageID)
+	if err != nil {
+		return nil, err
+	}
+	return llsm, nil
+}
+
+type LiveLocationSentMessageQuery struct {
+	BridgeID networkid.BridgeID
+	*dbutil.QueryHelper[*LiveLocationSentMessage]
+}
+
+// Put records a WhatsApp message ID sent for a Weave-originated share.
+func (llmq *LiveLocationSentMessageQuery) Put(ctx context.Context, loginID networkid.UserLoginID, portalKey networkid.PortalKey, matrixUserID id.UserID, waMessageID string) error {
+	return llmq.Exec(ctx, putLiveLocationSentMessageQuery, llmq.BridgeID, loginID, portalKey.ID, portalKey.Receiver, matrixUserID, waMessageID)
+}
+
+// Exists reports whether waMessageID was sent by the bridge for a
+// Weave-originated share in this portal. Querying without the login ID is
+// intentional: message IDs are unique, and the message converter does not know
+// which user login handled the original Matrix event.
+func (llmq *LiveLocationSentMessageQuery) Exists(ctx context.Context, portalKey networkid.PortalKey, waMessageID string) (bool, error) {
+	row, err := llmq.QueryOne(ctx, getLiveLocationSentMessageQuery, llmq.BridgeID, portalKey.ID, portalKey.Receiver, waMessageID)
+	if err != nil {
+		return false, err
+	}
+	return row != nil, nil
 }

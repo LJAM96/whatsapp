@@ -277,6 +277,36 @@ func noBridgePart() *bridgev2.ConvertedMessagePart {
 	}
 }
 
+// isWeaveLiveLocationEcho reports whether a from-me live location message is
+// the echo of a message the bridge sent to WhatsApp for a Weave-originated
+// share. Every ID we send (start, each update and the final stop) is recorded
+// in the sent-message table, so a direct ID match is enough. WhatsApp updates
+// may also reference the original share message through contextInfo.stanza_id,
+// so that ID is checked too. Bridging such an echo would create a loop: it
+// would be sent back to Matrix under the user's own MXID and then picked up by
+// the Matrix-to-WhatsApp live location handler.
+func (mc *MessageConverter) isWeaveLiveLocationEcho(ctx context.Context, portal *bridgev2.Portal, msg *waE2E.LiveLocationMessage, info *types.MessageInfo) bool {
+	if mc.DB == nil || mc.DB.LiveLocationSentMessage == nil || info == nil {
+		return false
+	}
+	queries := mc.DB.LiveLocationSentMessage
+	if exists, err := queries.Exists(ctx, portal.PortalKey, string(info.ID)); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("message_id", string(info.ID)).
+			Msg("Failed to check if live location message is an echo")
+	} else if exists {
+		return true
+	}
+	if stanzaID := msg.GetContextInfo().GetStanzaID(); stanzaID != "" {
+		if exists, err := queries.Exists(ctx, portal.PortalKey, stanzaID); err != nil {
+			zerolog.Ctx(ctx).Warn().Err(err).Str("stanza_id", stanzaID).
+				Msg("Failed to check if live location update references an echo")
+		} else if exists {
+			return true
+		}
+	}
+	return false
+}
+
 // convertLiveLocationMessage bridges WhatsApp live location messages to MSC3489
 // beacons. The first message starts a beacon_info state event and sends a
 // beacon; updates send further beacons; a message without coordinates stops the
@@ -290,6 +320,12 @@ func (mc *MessageConverter) convertLiveLocationMessage(
 	info *types.MessageInfo,
 	isBackfill bool,
 ) (*bridgev2.ConvertedMessagePart, *waE2E.ContextInfo) {
+	if info.IsFromMe && mc.isWeaveLiveLocationEcho(ctx, portal, msg, info) {
+		zerolog.Ctx(ctx).Debug().
+			Str("message_id", string(info.ID)).
+			Msg("Ignoring echo of a live location message sent by the bridge")
+		return noBridgePart(), msg.GetContextInfo()
+	}
 	if msg.DegreesLatitude == nil || msg.DegreesLongitude == nil {
 		if !isBackfill {
 			mc.stopLiveLocationBeacon(ctx, portal, intent)

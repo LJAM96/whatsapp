@@ -60,6 +60,12 @@ func newTestLiveLocationDB(t *testing.T) *wadb.Database {
 			wa_message_id TEXT NOT NULL DEFAULT '', sequence BIGINT NOT NULL DEFAULT 0,
 			expiry_ts BIGINT NOT NULL DEFAULT 0,
 			PRIMARY KEY (bridge_id, user_login_id, portal_id, portal_receiver, direction, matrix_user_id)
+		);
+		CREATE TABLE whatsapp_live_location_sent_message (
+			bridge_id TEXT NOT NULL, user_login_id TEXT NOT NULL,
+			portal_id TEXT NOT NULL, portal_receiver TEXT NOT NULL,
+			matrix_user_id TEXT NOT NULL, wa_message_id TEXT NOT NULL,
+			PRIMARY KEY (bridge_id, user_login_id, portal_id, portal_receiver, wa_message_id)
 		)
 	`)
 	if err != nil {
@@ -524,5 +530,54 @@ func TestLiveLocationSharePersistsAcrossRestart(t *testing.T) {
 	}
 	if expired != nil {
 		t.Errorf("expired share was returned: %+v", expired)
+	}
+}
+
+func TestConvertLiveLocationMessageSkipsWeaveEcho(t *testing.T) {
+	const (
+		roomID      = id.RoomID("!room:example.org")
+		ghostID     = id.UserID("@wa_ghost:example.org")
+		ownMessage  = "3EB0WEAVE-SENT"
+		otherUserID = "3EB0SOMEONE-ELSE"
+	)
+	portalKey := networkid.PortalKey{ID: "chat@example.org", Receiver: "login"}
+	portal := &bridgev2.Portal{Portal: &database.Portal{PortalKey: portalKey, MXID: roomID}}
+	lat, long := 51.5, -0.12
+
+	tests := []struct {
+		name        string
+		messageID   string
+		isFromMe    bool
+		stanzaID    string
+		wantSkipped bool
+	}{
+		{name: "echo of recorded message ID is skipped", messageID: ownMessage, isFromMe: true, wantSkipped: true},
+		{name: "echo referencing recorded original ID is skipped", messageID: "update-id", isFromMe: true, stanzaID: ownMessage, wantSkipped: true},
+		{name: "unrelated from-me message is bridged", messageID: otherUserID, isFromMe: true},
+		{name: "message from other user with our ID is bridged", messageID: ownMessage},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := newTestLiveLocationDB(t)
+			if err := db.LiveLocationSentMessage.Put(context.Background(), "login", portalKey, "@own:example.org", ownMessage); err != nil {
+				t.Fatal(err)
+			}
+			api := &mockMatrixAPI{mxid: ghostID}
+			mc := &MessageConverter{Bridge: &bridgev2.Bridge{Bot: api}, DB: db}
+			msg := &waE2E.LiveLocationMessage{DegreesLatitude: &lat, DegreesLongitude: &long}
+			if tt.stanzaID != "" {
+				msg.ContextInfo = &waE2E.ContextInfo{StanzaID: &tt.stanzaID}
+			}
+			info := &types.MessageInfo{ID: types.MessageID(tt.messageID), Timestamp: time.Now(), MessageSource: types.MessageSource{IsFromMe: tt.isFromMe}}
+
+			part, _ := mc.convertLiveLocationMessage(context.Background(), portal, api, msg, info, false)
+			if part.DontBridge != tt.wantSkipped {
+				t.Errorf("DontBridge = %v, want %v", part.DontBridge, tt.wantSkipped)
+			}
+			bridged := len(api.states) > 0 || api.beaconCount > 0
+			if bridged == tt.wantSkipped {
+				t.Errorf("bridged to Matrix = %v, want %v", bridged, !tt.wantSkipped)
+			}
+		})
 	}
 }

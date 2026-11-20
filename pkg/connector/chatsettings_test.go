@@ -382,7 +382,7 @@ func TestHandleChatSettingsIgnoresOtherSenders(t *testing.T) {
 
 func TestGetCustomMatrixEventTypes(t *testing.T) {
 	got := (&WhatsAppConnector{}).GetCustomMatrixEventTypes()
-	want := []event.Type{ChatSettingsEventType}
+	want := []event.Type{ChatSettingsEventType, event.StateUnstableBeaconInfo, event.EventUnstableBeacon}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("GetCustomMatrixEventTypes() = %v, want %v", got, want)
 	}

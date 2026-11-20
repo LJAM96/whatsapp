@@ -49,9 +49,6 @@ type MessageConverter struct {
 
 	stickerPackCache     map[string]*types.StickerPack
 	stickerPackCacheLock sync.Mutex
-
-	liveLocationLock sync.Mutex
-	liveLocations    map[string]*liveLocationShare
 }
 
 func New(br *bridgev2.Bridge) *MessageConverter {
@@ -59,7 +56,6 @@ func New(br *bridgev2.Bridge) *MessageConverter {
 		Bridge:           br,
 		MaxFileSize:      50 * 1024 * 1024,
 		stickerPackCache: make(map[string]*types.StickerPack),
-		liveLocations:    make(map[string]*liveLocationShare),
 	}
 	mc.HTMLParser = &format.HTMLParser{
 		PillConverter: mc.convertPill,

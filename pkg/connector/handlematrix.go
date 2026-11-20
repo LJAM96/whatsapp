@@ -420,24 +420,36 @@ func (wa *WhatsAppClient) HandleMatrixViewLimitedMedia(ctx context.Context, msg 
 	return wrapWhatsAppError(err)
 }
 
+// matrixTypingToChatPresence converts a bridgev2 Matrix typing notification to
+// a WhatsApp chat presence. The bool is false for typing types that should be
+// ignored entirely.
+//
+// Matrix m.typing events don't carry a status type (event.TypingEventContent
+// only has user_ids), so bridgev2 always reports TypingTypeText today. The
+// recording media mapping is kept so that sending media=audio works as soon as
+// bridgev2 can propagate a recording typing type from Matrix.
+func matrixTypingToChatPresence(msg *bridgev2.MatrixTyping) (types.ChatPresence, types.ChatPresenceMedia, bool) {
+	chatPresence := types.ChatPresencePaused
+	if msg.IsTyping {
+		chatPresence = types.ChatPresenceComposing
+	}
+	var mediaPresence types.ChatPresenceMedia
+	switch msg.Type {
+	case bridgev2.TypingTypeRecordingMedia:
+		mediaPresence = types.ChatPresenceMediaAudio
+	case bridgev2.TypingTypeUploadingMedia:
+		return "", "", false
+	}
+	return chatPresence, mediaPresence, true
+}
+
 func (wa *WhatsAppClient) HandleMatrixTyping(ctx context.Context, msg *bridgev2.MatrixTyping) (retErr error) {
 	portalJID, err := waid.ParsePortalID(msg.Portal.ID)
 	if err != nil {
 		return err
 	}
-	var chatPresence types.ChatPresence
-	var mediaPresence types.ChatPresenceMedia
-	if msg.IsTyping {
-		chatPresence = types.ChatPresenceComposing
-	} else {
-		chatPresence = types.ChatPresencePaused
-	}
-	switch msg.Type {
-	case bridgev2.TypingTypeText:
-		mediaPresence = types.ChatPresenceMediaText
-	case bridgev2.TypingTypeRecordingMedia:
-		mediaPresence = types.ChatPresenceMediaAudio
-	case bridgev2.TypingTypeUploadingMedia:
+	chatPresence, mediaPresence, ok := matrixTypingToChatPresence(msg)
+	if !ok {
 		return nil
 	}
 

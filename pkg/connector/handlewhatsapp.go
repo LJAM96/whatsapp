@@ -665,6 +665,23 @@ func (wa *WhatsAppClient) handleWAReceipt(ctx context.Context, evt *events.Recei
 	return res.Success
 }
 
+// chatPresenceToTyping converts a WhatsApp chat presence update into a bridgev2
+// typing type and timeout.
+//
+// WhatsApp uses media=audio to distinguish recording a voice message from
+// typing text. There is no Matrix representation for that distinction: m.typing
+// only carries user_ids (event.TypingEventContent), and bridgev2 drops non-text
+// typing types when marking a ghost as typing (ASIntent.MarkTyping). Audio
+// recording is therefore reported as a plain text typing notification, which is
+// the only form that currently reaches Matrix.
+func chatPresenceToTyping(evt *events.ChatPresence) (bridgev2.TypingType, time.Duration) {
+	timeout := 15 * time.Second
+	if evt.State == types.ChatPresencePaused {
+		timeout = 0
+	}
+	return bridgev2.TypingTypeText, timeout
+}
+
 func (wa *WhatsAppClient) handleWAChatPresence(ctx context.Context, evt *events.ChatPresence) {
 	if evt.Chat.Server == types.DefaultUserServer && evt.Sender.ToNonAD() == evt.Chat {
 		if evt.SenderAlt.IsEmpty() {
@@ -675,14 +692,7 @@ func (wa *WhatsAppClient) handleWAChatPresence(ctx context.Context, evt *events.
 			evt.Chat = evt.Sender.ToNonAD()
 		}
 	}
-	typingType := bridgev2.TypingTypeText
-	timeout := 15 * time.Second
-	if evt.Media == types.ChatPresenceMediaAudio {
-		typingType = bridgev2.TypingTypeRecordingMedia
-	}
-	if evt.State == types.ChatPresencePaused {
-		timeout = 0
-	}
+	typingType, timeout := chatPresenceToTyping(evt)
 
 	wa.UserLogin.QueueRemoteEvent(&simplevent.Typing{
 		EventMeta: simplevent.EventMeta{

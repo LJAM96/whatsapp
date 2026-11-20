@@ -191,17 +191,23 @@ func joinApprovalFromJoinRule(prev, current event.JoinRule) *bool {
 	return ptr.Ptr(isRequired)
 }
 
+// joinApprovalFromChange maps a Matrix join-rule change to the WhatsApp join
+// approval mode it implies, treating a missing previous rule as invite.
+func joinApprovalFromChange(msg *bridgev2.MatrixJoinRuleChange) *bool {
+	prevRule := event.JoinRuleInvite
+	if msg.PrevContent != nil {
+		prevRule = msg.PrevContent.JoinRule
+	}
+	return joinApprovalFromJoinRule(prevRule, msg.Content.JoinRule)
+}
+
 // HandleMatrixJoinRule applies a Matrix join-rule change to WhatsApp's group
 // join approval mode. Knock maps to approval being required.
 func (wa *WhatsAppClient) HandleMatrixJoinRule(ctx context.Context, msg *bridgev2.MatrixJoinRuleChange) (bool, error) {
 	if msg == nil || msg.Portal == nil || msg.Content == nil {
 		return false, nil
 	}
-	prevRule := event.JoinRuleInvite
-	if msg.PrevContent != nil {
-		prevRule = msg.PrevContent.JoinRule
-	}
-	approval := joinApprovalFromJoinRule(prevRule, msg.Content.JoinRule)
+	approval := joinApprovalFromChange(msg)
 	if approval == nil {
 		return false, nil
 	}

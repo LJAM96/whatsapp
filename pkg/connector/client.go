@@ -64,6 +64,7 @@ func (wa *WhatsAppConnector) LoadUserLogin(ctx context.Context, login *bridgev2.
 
 		disableNewsletter: store.BaseClientPayload.GetUserAgent().GetPlatform() == waWa6.ClientPayload_UserAgent_MACOS,
 	}
+	w.recording = newRecordingPresence(w, realRecordingClock{})
 	login.Client = w
 
 	loginMetadata := login.Metadata.(*waid.UserLoginMetadata)
@@ -131,6 +132,7 @@ type WhatsAppClient struct {
 	pushNamesSynced    *exsync.Event
 	lastPresence       types.Presence
 	presenceSubs       *exsync.Set[types.JID]
+	recording          *recordingPresence
 	blocklistLock      sync.Mutex
 	starredLock        sync.Mutex
 	labelLock          sync.Mutex

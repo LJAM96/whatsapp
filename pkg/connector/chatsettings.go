@@ -69,7 +69,7 @@ var (
 // GetCustomMatrixEventTypes declares the Weave-specific event types that the
 // Matrix connector should register and forward to HandleMatrixCustomEvent.
 func (wa *WhatsAppConnector) GetCustomMatrixEventTypes() []event.Type {
-	return []event.Type{ChatSettingsEventType}
+	return []event.Type{ChatSettingsEventType, RecordingEventType}
 }
 
 // HandleMatrixCustomEvent routes declared custom events to their handlers.
@@ -80,6 +80,8 @@ func (wa *WhatsAppClient) HandleMatrixCustomEvent(ctx context.Context, msg *brid
 	switch msg.Event.Type {
 	case ChatSettingsEventType:
 		return wa.HandleChatSettings(ctx, msg.Portal, msg.Event)
+	case RecordingEventType:
+		return wa.HandleRecording(ctx, msg.Portal, msg.Event)
 	default:
 		return nil
 	}

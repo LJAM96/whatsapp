@@ -382,7 +382,7 @@ func TestHandleChatSettingsIgnoresOtherSenders(t *testing.T) {
 
 func TestGetCustomMatrixEventTypes(t *testing.T) {
 	got := (&WhatsAppConnector{}).GetCustomMatrixEventTypes()
-	want := []event.Type{ChatSettingsEventType}
+	want := []event.Type{ChatSettingsEventType, RecordingEventType}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("GetCustomMatrixEventTypes() = %v, want %v", got, want)
 	}
@@ -406,6 +406,8 @@ func TestHandleMatrixCustomEvent(t *testing.T) {
 	}{
 		{"chat settings from own user", ChatSettingsEventType, ownMXID, true},
 		{"chat settings from other user", ChatSettingsEventType, id.UserID("@other:example.org"), false},
+		{"recording from own user", RecordingEventType, ownMXID, true},
+		{"recording from other user", RecordingEventType, id.UserID("@other:example.org"), false},
 		{"unrelated custom type", event.Type{Type: "com.example.other", Class: event.MessageEventType}, ownMXID, false},
 	}
 	for _, tt := range tests {

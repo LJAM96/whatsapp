@@ -22,6 +22,8 @@ displayname_template: '{{or .BusinessName .PushName .Phone .RedactedPhone "Unkno
 
 # Should incoming calls send a message to the Matrix room?
 call_start_notices: true
+# Should finished calls send a message with call details (type, duration) to the Matrix room?
+call_history_notices: true
 # Should another user's cryptographic identity changing send a message to Matrix?
 identity_change_notices: false
 # Should the bridge mark you as online on WhatsApp when you send typing notifications?

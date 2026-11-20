@@ -19,13 +19,57 @@ package msgconv
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"google.golang.org/protobuf/proto"
+	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/event"
 )
+
+func TestViewLimitedVideoNote(t *testing.T) {
+	countLimit := &event.BeeperViewLimitedMedia{Type: "count", Count: 1}
+	videoNoteInfo := func() *event.FileInfo {
+		return &event.FileInfo{Extra: map[string]any{VideoNoteField: true}}
+	}
+	tests := []struct {
+		name      string
+		msgType   event.MessageType
+		info      *event.FileInfo
+		limit     *event.BeeperViewLimitedMedia
+		wantError bool
+	}{
+		{name: "view-limited video note", msgType: event.MsgVideo, info: videoNoteInfo(), limit: countLimit, wantError: true},
+		{name: "video note with time limit", msgType: event.MsgVideo, info: videoNoteInfo(), limit: &event.BeeperViewLimitedMedia{Type: "time", Count: 1}, wantError: true},
+		{name: "video note without limit", msgType: event.MsgVideo, info: videoNoteInfo()},
+		{name: "ordinary view-limited video", msgType: event.MsgVideo, info: &event.FileInfo{}, limit: countLimit},
+		{name: "view-limited image", msgType: event.MsgImage, info: videoNoteInfo(), limit: countLimit},
+		{name: "view-limited video note with nil info", msgType: event.MsgVideo, limit: countLimit},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := &event.MessageEventContent{
+				MsgType:           tt.msgType,
+				Info:              tt.info,
+				BeeperViewLimited: tt.limit,
+			}
+			if got := viewLimitedVideoNote(content); got != tt.wantError {
+				t.Errorf("viewLimitedVideoNote() = %v, want %v", got, tt.wantError)
+			}
+			if !tt.wantError {
+				return
+			}
+			_, _, err := (&MessageConverter{}).ToWhatsApp(
+				context.Background(), nil, &event.Event{}, content, nil, nil, nil, nil,
+			)
+			if !errors.Is(err, bridgev2.ErrUnsupportedMessageType) {
+				t.Errorf("ToWhatsApp() error = %v, want ErrUnsupportedMessageType", err)
+			}
+		})
+	}
+}
 
 func TestConstructMediaMessageVideoNote(t *testing.T) {
 	uploaded := &whatsmeow.UploadResponse{

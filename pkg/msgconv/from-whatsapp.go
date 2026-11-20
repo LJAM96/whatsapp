@@ -193,21 +193,21 @@ func (mc *MessageConverter) ToMatrix(
 	case waMsg.RichResponseMessage != nil:
 		part, contextInfo = mc.convertRichResponseMessage(ctx, waMsg.RichResponseMessage, waMsg)
 	case waMsg.ImageMessage != nil:
-		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.ImageMessage, "photo", info, isViewOnce, previouslyConvertedPart)
+		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.ImageMessage, "photo", info, isViewOnce, previouslyConvertedPart, false)
 	case waMsg.StickerMessage != nil:
-		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.StickerMessage, "sticker", info, isViewOnce, previouslyConvertedPart)
+		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.StickerMessage, "sticker", info, isViewOnce, previouslyConvertedPart, false)
 	case waMsg.VideoMessage != nil:
-		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.VideoMessage, "video attachment", info, isViewOnce, previouslyConvertedPart)
+		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.VideoMessage, "video attachment", info, isViewOnce, previouslyConvertedPart, false)
 	case waMsg.PtvMessage != nil:
-		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.PtvMessage, "video message", info, isViewOnce, previouslyConvertedPart)
+		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.PtvMessage, "video message", info, isViewOnce, previouslyConvertedPart, true)
 	case waMsg.AudioMessage != nil:
 		typeName := "audio attachment"
 		if waMsg.AudioMessage.GetPTT() {
 			typeName = "voice message"
 		}
-		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.AudioMessage, typeName, info, isViewOnce, previouslyConvertedPart)
+		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.AudioMessage, typeName, info, isViewOnce, previouslyConvertedPart, false)
 	case waMsg.DocumentMessage != nil:
-		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.DocumentMessage, "file attachment", info, isViewOnce, previouslyConvertedPart)
+		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.DocumentMessage, "file attachment", info, isViewOnce, previouslyConvertedPart, false)
 	case waMsg.AlbumMessage != nil:
 		part, contextInfo = mc.convertAlbumMessage(ctx, waMsg.AlbumMessage)
 	case waMsg.LocationMessage != nil:

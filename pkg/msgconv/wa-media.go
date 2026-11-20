@@ -48,6 +48,7 @@ func (mc *MessageConverter) convertMediaMessage(
 	messageInfo *types.MessageInfo,
 	isViewOnce bool,
 	cachedPart *bridgev2.ConvertedMessagePart,
+	isVideoNote bool,
 ) (part *bridgev2.ConvertedMessagePart, contextInfo *waE2E.ContextInfo) {
 	if viewOnceMsg, ok := msg.(MediaMessageWithViewOnce); ok && viewOnceMsg.GetViewOnce() {
 		isViewOnce = true
@@ -65,7 +66,7 @@ func (mc *MessageConverter) convertMediaMessage(
 			},
 		}, nil
 	}
-	preparedMedia := prepareMediaMessage(msg)
+	preparedMedia := prepareMediaMessage(msg, isVideoNote)
 	preparedMedia.TypeDescription = typeName
 	if preparedMedia.FileName != "" && preparedMedia.Body != preparedMedia.FileName {
 		mc.parseFormatting(preparedMedia.MessageEventContent, false, false)
@@ -158,7 +159,12 @@ func (mc *MessageConverter) convertAlbumMessage(ctx context.Context, msg *waE2E.
 	}, msg.GetContextInfo()
 }
 
-const FailedMediaField = "fi.mau.whatsapp.failed_media"
+const (
+	FailedMediaField = "fi.mau.whatsapp.failed_media"
+	// VideoNoteField marks a normal m.video as a WhatsApp PTV (round video).
+	// There is no standard Matrix field or Beeper convention for video notes yet.
+	VideoNoteField = "fi.mau.whatsapp.video_note"
+)
 
 type FailedMediaKeys struct {
 	Key        []byte              `json:"key"`
@@ -271,7 +277,7 @@ func fixStickerDimensions(info *event.FileInfo) {
 	}
 }
 
-func prepareMediaMessage(rawMsg MediaMessage) *PreparedMedia {
+func prepareMediaMessage(rawMsg MediaMessage, isVideoNote bool) *PreparedMedia {
 	extraInfo := map[string]any{}
 	data := &PreparedMedia{
 		Type: event.EventMessage,
@@ -329,6 +335,9 @@ func prepareMediaMessage(rawMsg MediaMessage) *PreparedMedia {
 			extraInfo["fi.mau.autoplay"] = true
 			extraInfo["fi.mau.hide_controls"] = true
 			extraInfo["fi.mau.no_audio"] = true
+		}
+		if isVideoNote {
+			extraInfo[VideoNoteField] = true
 		}
 		data.FileName = "video" + exmime.ExtensionFromMimetype(msg.GetMimetype())
 	default:

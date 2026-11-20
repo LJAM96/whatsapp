@@ -318,30 +318,44 @@ func (mc *MessageConverter) constructMediaMessage(
 		}
 	case event.MsgVideo:
 		isGIF := mime == "video/mp4" && (content.Info.MimeType == "image/gif" || content.Info.MauGIF)
+		var isVideoNote bool
+		if content.Info != nil {
+			isVideoNote, _ = content.Info.Extra[VideoNoteField].(bool)
+		}
 
 		width := uint32(content.Info.Width)
 		height := uint32(content.Info.Height)
+		if isVideoNote {
+			// Video notes are square; keep the larger dimension so nothing is cropped.
+			if width > height {
+				height = width
+			} else {
+				width = height
+			}
+		}
 		seconds := uint32(content.Info.Duration / 1000)
 
-		return &waE2E.Message{
-			VideoMessage: &waE2E.VideoMessage{
-				GifPlayback: proto.Bool(isGIF),
-				Width:       &width,
-				Height:      &height,
-				Seconds:     &seconds,
+		videoMessage := &waE2E.VideoMessage{
+			GifPlayback: proto.Bool(isGIF),
+			Width:       &width,
+			Height:      &height,
+			Seconds:     &seconds,
 
-				Caption:       proto.String(caption),
-				JPEGThumbnail: thumbnail,
-				URL:           proto.String(uploaded.URL),
-				DirectPath:    proto.String(uploaded.DirectPath),
-				MediaKey:      uploaded.MediaKey,
-				Mimetype:      proto.String(mime),
-				FileEncSHA256: uploaded.FileEncSHA256,
-				FileSHA256:    uploaded.FileSHA256,
-				FileLength:    proto.Uint64(uploaded.FileLength),
-				ContextInfo:   contextInfo,
-			},
+			Caption:       proto.String(caption),
+			JPEGThumbnail: thumbnail,
+			URL:           proto.String(uploaded.URL),
+			DirectPath:    proto.String(uploaded.DirectPath),
+			MediaKey:      uploaded.MediaKey,
+			Mimetype:      proto.String(mime),
+			FileEncSHA256: uploaded.FileEncSHA256,
+			FileSHA256:    uploaded.FileSHA256,
+			FileLength:    proto.Uint64(uploaded.FileLength),
+			ContextInfo:   contextInfo,
 		}
+		if isVideoNote {
+			return &waE2E.Message{PtvMessage: videoMessage}
+		}
+		return &waE2E.Message{VideoMessage: videoMessage}
 	case event.MsgFile:
 		fileName := content.FileName
 		if fileName == "" {

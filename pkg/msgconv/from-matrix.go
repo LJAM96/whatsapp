@@ -179,6 +179,10 @@ func (mc *MessageConverter) ToWhatsApp(
 			return nil, nil, err
 		}
 	case event.MessageType(event.EventSticker.Type), event.MsgImage, event.MsgVideo, event.MsgAudio, event.MsgFile:
+		if contactMessage, ok := mc.tryVCardMessage(ctx, content, contextInfo); ok {
+			message = contactMessage
+			break
+		}
 		uploaded, thumbnail, mime, err := mc.reuploadFileToWhatsApp(ctx, content)
 		if err != nil {
 			return nil, nil, err

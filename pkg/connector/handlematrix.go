@@ -195,6 +195,29 @@ func (wa *WhatsAppClient) HandleMatrixReaction(ctx context.Context, msg *bridgev
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse portal ID: %w", err)
 	}
+	// Reactions with the RSVP emojis on an event message are sent as WhatsApp
+	// event responses instead of plain reactions (upstream mautrix/whatsapp#803).
+	if meta, ok := msg.TargetMessage.Metadata.(*waid.MessageMetadata); ok && meta.IsEvent {
+		emoji := msg.Content.RelatesTo.Key
+		if msg.PreHandleResp != nil {
+			emoji = msg.PreHandleResp.Emoji
+		}
+		if response, ok := msgconv.EmojiToEventResponse(emoji); ok {
+			waMsg, err := buildEventResponseMessage(ctx, wa, messageID, response, time.UnixMilli(msg.Event.Timestamp))
+			if err != nil {
+				return nil, wrapConversionError(fmt.Errorf("failed to build event response: %w", err))
+			}
+			defer wa.mcTrack(msg, time.Now(), &retErr)
+			resp, err := wa.Client.SendMessage(ctx, portalJID, waMsg, whatsmeow.SendRequestExtra{})
+			zerolog.Ctx(ctx).Trace().Any("response", resp).Msg("WhatsApp event response send result")
+			return &database.Reaction{
+				Metadata: &waid.ReactionMetadata{
+					SenderDeviceID:  wa.JID.Device,
+					IsEventResponse: true,
+				},
+			}, wa.wrapSendError(err)
+		}
+	}
 	reactionMsg := &waE2E.Message{
 		ReactionMessage: &waE2E.ReactionMessage{
 			Key:               wa.messageIDToKey(messageID),
@@ -233,6 +256,11 @@ func (wa *WhatsAppClient) HandleMatrixReactionRemove(ctx context.Context, msg *b
 	portalJID, err := waid.ParsePortalID(msg.Portal.ID)
 	if err != nil {
 		return fmt.Errorf("failed to parse portal ID: %w", err)
+	}
+	if meta, ok := msg.TargetReaction.Metadata.(*waid.ReactionMetadata); ok && meta.IsEventResponse {
+		// WhatsApp has no "remove RSVP" response, so there is nothing to send.
+		zerolog.Ctx(ctx).Debug().Str("message_id", string(messageID.ID)).Msg("Ignoring removal of event response reaction")
+		return nil
 	}
 
 	reactionMsg := &waE2E.Message{

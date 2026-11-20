@@ -254,6 +254,14 @@ func (mc *MessageConverter) ToMatrix(
 	cm := &bridgev2.ConvertedMessage{
 		Parts: []*bridgev2.ConvertedMessagePart{part},
 	}
+	// Event messages also get an .ics attachment so they can be added to a
+	// calendar from Matrix (upstream mautrix/whatsapp#789). Skip edits, which
+	// only use the first part.
+	if waMsg.EventMessage != nil && getEditTargetID(ctx) == "" {
+		if icalPart := mc.eventICalPart(ctx, portal, info, waMsg.EventMessage); icalPart != nil {
+			cm.Parts = append(cm.Parts, icalPart)
+		}
+	}
 	if contextInfo.GetExpiration() > 0 {
 		cm.Disappear.Timer = time.Duration(contextInfo.GetExpiration()) * time.Second
 		cm.Disappear.Type = event.DisappearingTypeAfterSend

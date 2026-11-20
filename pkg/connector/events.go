@@ -105,6 +105,7 @@ type WAMessageEvent struct {
 
 	parsedMessageType             string
 	isUndecryptableUpsertSubEvent bool
+	isEventResponse               bool
 	dontRenderEdited              bool
 	postHandle                    func()
 }
@@ -270,12 +271,18 @@ func (evt *WAMessageEvent) GetTargetMessage() networkid.MessageID {
 }
 
 func (evt *WAMessageEvent) GetReactionEmoji() (string, networkid.EmojiID) {
+	if evt.isEventResponse {
+		// A stable emoji ID makes bridgev2 replace the previous RSVP reaction
+		// when someone changes their response from going to maybe, etc.
+		return evt.Message.GetReactionMessage().GetText(), networkid.EmojiID("wa-event-response")
+	}
 	return evt.Message.GetReactionMessage().GetText(), ""
 }
 
 func (evt *WAMessageEvent) GetReactionDBMetadata() any {
 	return &waid.ReactionMetadata{
-		SenderDeviceID: evt.Info.Sender.Device,
+		SenderDeviceID:  evt.Info.Sender.Device,
+		IsEventResponse: evt.isEventResponse,
 	}
 }
 

@@ -328,6 +328,7 @@ func (wa *WhatsAppClient) handleWAMessage(ctx context.Context, evt *events.Messa
 		return false
 	}
 	parsedMessageType := getMessageType(evt.Message)
+	isEventResponse := false
 	if encReact := evt.Message.GetEncReactionMessage(); encReact != nil {
 		decrypted, err := wa.Client.DecryptReaction(ctx, evt)
 		if err != nil {
@@ -336,6 +337,26 @@ func (wa *WhatsAppClient) handleWAMessage(ctx context.Context, evt *events.Messa
 		}
 		decrypted.Key = encReact.GetTargetMessageKey()
 		evt.Message.ReactionMessage = decrypted
+	}
+	if evt.Message.GetEncEventResponseMessage() != nil {
+		response, eventKey, err := decryptEventResponse(ctx, wa.Client, evt)
+		if err != nil {
+			wa.UserLogin.Log.Err(err).Str("message_id", evt.Info.ID).Msg("Failed to decrypt event response")
+		} else if emoji := msgconv.EventResponseToEmoji(response.GetResponse()); emoji == "" {
+			wa.UserLogin.Log.Debug().
+				Str("message_id", evt.Info.ID).
+				Str("response", response.GetResponse().String()).
+				Msg("Ignoring unknown event response")
+		} else {
+			// Bridge RSVPs as reactions on the event message (upstream mautrix/whatsapp#803).
+			evt.Message.ReactionMessage = &waE2E.ReactionMessage{
+				Key:               eventKey,
+				Text:              ptr.Ptr(emoji),
+				SenderTimestampMS: ptr.Ptr(response.GetTimestampMS()),
+			}
+			parsedMessageType = "reaction"
+			isEventResponse = true
+		}
 	}
 	if encComment := evt.Message.GetEncCommentMessage(); encComment != nil {
 		decrypted, err := wa.Client.DecryptComment(ctx, evt)
@@ -432,6 +453,7 @@ func (wa *WhatsAppClient) handleWAMessage(ctx context.Context, evt *events.Messa
 		MsgEvent: evt,
 
 		parsedMessageType: parsedMessageType,
+		isEventResponse:   isEventResponse,
 		dontRenderEdited:  dontRenderEdited,
 	}
 	if evt.UnavailableRequestID != "" {

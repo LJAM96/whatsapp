@@ -90,10 +90,15 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 		success = wa.resyncBlocklist(ctx)()
 	case *events.Message:
 		success = wa.handleWAMessage(ctx, evt)
+		if isPresenceContact(evt.Info.Chat) {
+			wa.subscribeToPresence(ctx, evt.Info.Chat)
+		}
 	case *events.Receipt:
 		success = wa.handleWAReceipt(ctx, evt)
 	case *events.ChatPresence:
 		wa.handleWAChatPresence(ctx, evt)
+	case *events.Presence:
+		wa.handleWAPresence(ctx, evt)
 	case *events.UndecryptableMessage:
 		success = wa.handleWAUndecryptableMessage(ctx, evt)
 
@@ -203,6 +208,7 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 			}()
 			go wa.syncRemoteProfile(ctx, nil)
 		}
+		go wa.resubscribePresences(ctx)
 	case *events.OfflineSyncPreview:
 		log.Info().
 			Int("message_count", evt.Messages).

@@ -233,6 +233,7 @@ func (mc *MessageConverter) ToMatrix(
 	}
 
 	part.Content.Mentions = &event.Mentions{}
+	markViewOnce(part, isViewOnce, mc.DisableViewOnce)
 	if part.DBMetadata == nil {
 		part.DBMetadata = &waid.MessageMetadata{}
 	}

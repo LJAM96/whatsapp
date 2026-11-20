@@ -207,6 +207,7 @@ func (mc *MessageConverter) ToWhatsApp(
 	default:
 		return nil, nil, fmt.Errorf("%w %s", bridgev2.ErrUnsupportedMessageType, content.MsgType)
 	}
+	message = applyViewOnce(message, content.BeeperViewLimited)
 	extra := &whatsmeow.SendRequestExtra{}
 	if portal.Metadata.(*waid.PortalMetadata).CommunityAnnouncementGroup {
 		if threadRoot != nil {
@@ -238,6 +239,27 @@ func (mc *MessageConverter) ToWhatsApp(
 		}
 	}
 	return message, extra, nil
+}
+
+// applyViewOnce wraps a WhatsApp media message in a view-once envelope. WhatsApp
+// clients understand both the legacy viewOnceMessage wrapper and the inline
+// viewOnce flag on the media itself; whatsmeow unwraps the former and this bridge
+// reads the latter when receiving, so send both for compatibility.
+func applyViewOnce(msg *waE2E.Message, limit *event.BeeperViewLimitedMedia) *waE2E.Message {
+	if limit == nil || limit.Type != "count" || limit.Count < 1 || msg == nil {
+		return msg
+	}
+	switch {
+	case msg.GetImageMessage() != nil:
+		msg.ImageMessage.ViewOnce = proto.Bool(true)
+	case msg.GetVideoMessage() != nil:
+		msg.VideoMessage.ViewOnce = proto.Bool(true)
+	case msg.GetAudioMessage() != nil:
+		msg.AudioMessage.ViewOnce = proto.Bool(true)
+	default:
+		return msg
+	}
+	return &waE2E.Message{ViewOnceMessage: &waE2E.FutureProofMessage{Message: msg}}
 }
 
 func (mc *MessageConverter) constructMediaMessage(

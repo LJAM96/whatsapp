@@ -213,7 +213,7 @@ func (mc *MessageConverter) ToMatrix(
 	case waMsg.LocationMessage != nil:
 		part, contextInfo = mc.convertLocationMessage(ctx, waMsg.LocationMessage)
 	case waMsg.LiveLocationMessage != nil:
-		part, contextInfo = mc.convertLiveLocationMessage(ctx, waMsg.LiveLocationMessage)
+		part, contextInfo = mc.convertLiveLocationMessage(ctx, portal, intent, waMsg.LiveLocationMessage, info, isBackfill)
 	case waMsg.ContactMessage != nil:
 		part, contextInfo = mc.convertContactMessage(ctx, waMsg.ContactMessage)
 	case waMsg.ContactsArrayMessage != nil:

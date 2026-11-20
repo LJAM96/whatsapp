@@ -167,22 +167,7 @@ func (wa *WhatsAppClient) changeGroupAdmins(ctx context.Context, portalJID types
 	return nil
 }
 
-// MatrixJoinRuleChange is the payload for the join-rule hook that bridgev2
-// still needs to add (see the report). It is defined here so the connector
-// side can be completed with today's bridgev2 module.
-type MatrixJoinRuleChange struct {
-	Portal      *bridgev2.Portal
-	Content     *event.JoinRulesEventContent
-	PrevContent *event.JoinRulesEventContent
-}
-
-// JoinRuleHandlingNetworkAPI is the interface bridgev2 needs to route
-// m.room.join_rules events to the network connector.
-type JoinRuleHandlingNetworkAPI interface {
-	HandleMatrixJoinRule(ctx context.Context, msg *MatrixJoinRuleChange) (bool, error)
-}
-
-var _ JoinRuleHandlingNetworkAPI = (*WhatsAppClient)(nil)
+var _ bridgev2.JoinRuleHandlingNetworkAPI = (*WhatsAppClient)(nil)
 
 // joinRuleForApprovalMode is the Matrix representation of WhatsApp's group
 // join approval mode. Knock means members can request to join and admins
@@ -207,9 +192,8 @@ func joinApprovalFromJoinRule(prev, current event.JoinRule) *bool {
 }
 
 // HandleMatrixJoinRule applies a Matrix join-rule change to WhatsApp's group
-// join approval mode. This is only called once bridgev2 routes join rule
-// events to this hook.
-func (wa *WhatsAppClient) HandleMatrixJoinRule(ctx context.Context, msg *MatrixJoinRuleChange) (bool, error) {
+// join approval mode. Knock maps to approval being required.
+func (wa *WhatsAppClient) HandleMatrixJoinRule(ctx context.Context, msg *bridgev2.MatrixJoinRuleChange) (bool, error) {
 	if msg == nil || msg.Portal == nil || msg.Content == nil {
 		return false, nil
 	}

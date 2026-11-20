@@ -79,6 +79,7 @@ func (wa *WhatsAppConnector) GetCustomMatrixEventTypes() []event.Type {
 		LabelEventType,
 		event.StateUnstableBeaconInfo,
 		event.EventUnstableBeacon,
+		RecordingEventType,
 	}
 }
 
@@ -98,6 +99,8 @@ func (wa *WhatsAppClient) HandleMatrixCustomEvent(ctx context.Context, msg *brid
 		return wa.HandleMatrixBeaconInfo(ctx, msg.Portal, msg.Event)
 	case event.EventUnstableBeacon:
 		return wa.HandleMatrixBeacon(ctx, msg.Portal, msg.Event)
+	case RecordingEventType:
+		return wa.HandleRecording(ctx, msg.Portal, msg.Event)
 	default:
 		return nil
 	}

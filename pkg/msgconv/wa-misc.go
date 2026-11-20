@@ -317,8 +317,9 @@ func (mc *MessageConverter) convertEventMessage(ctx context.Context, msg *waE2E.
 		content = format.HTMLToContent(buf.String())
 	}
 	return &bridgev2.ConvertedMessagePart{
-		Type:    event.EventMessage,
-		Content: &content,
+		Type:       event.EventMessage,
+		Content:    &content,
+		DBMetadata: &waid.MessageMetadata{IsEvent: true},
 	}, msg.GetContextInfo()
 }
 

@@ -100,6 +100,7 @@ type MessageMetadata struct {
 	FailedMediaMeta  json.RawMessage   `json:"media_meta,omitempty"`
 	DirectMediaMeta  json.RawMessage   `json:"direct_media_meta,omitempty"`
 	IsMatrixPoll     bool              `json:"is_matrix_poll,omitzero"`
+	IsEvent          bool              `json:"is_event,omitzero"`
 	Edits            []types.MessageID `json:"edits,omitempty"`
 }
 
@@ -120,10 +121,12 @@ func (mm *MessageMetadata) CopyFrom(other any) {
 		mm.GroupInvite = otherMM.GroupInvite
 	}
 	mm.IsMatrixPoll = mm.IsMatrixPoll || otherMM.IsMatrixPoll
+	mm.IsEvent = mm.IsEvent || otherMM.IsEvent
 }
 
 type ReactionMetadata struct {
-	SenderDeviceID uint16 `json:"sender_device_id,omitempty"`
+	SenderDeviceID  uint16 `json:"sender_device_id,omitempty"`
+	IsEventResponse bool   `json:"is_event_response,omitzero"`
 }
 
 type PortalMetadata struct {

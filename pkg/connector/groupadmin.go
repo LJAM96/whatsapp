@@ -167,22 +167,7 @@ func (wa *WhatsAppClient) changeGroupAdmins(ctx context.Context, portalJID types
 	return nil
 }
 
-// MatrixJoinRuleChange is the payload for the join-rule hook that bridgev2
-// still needs to add (see the report). It is defined here so the connector
-// side can be completed with today's bridgev2 module.
-type MatrixJoinRuleChange struct {
-	Portal      *bridgev2.Portal
-	Content     *event.JoinRulesEventContent
-	PrevContent *event.JoinRulesEventContent
-}
-
-// JoinRuleHandlingNetworkAPI is the interface bridgev2 needs to route
-// m.room.join_rules events to the network connector.
-type JoinRuleHandlingNetworkAPI interface {
-	HandleMatrixJoinRule(ctx context.Context, msg *MatrixJoinRuleChange) (bool, error)
-}
-
-var _ JoinRuleHandlingNetworkAPI = (*WhatsAppClient)(nil)
+var _ bridgev2.JoinRuleHandlingNetworkAPI = (*WhatsAppClient)(nil)
 
 // joinRuleForApprovalMode is the Matrix representation of WhatsApp's group
 // join approval mode. Knock means members can request to join and admins
@@ -206,18 +191,23 @@ func joinApprovalFromJoinRule(prev, current event.JoinRule) *bool {
 	return ptr.Ptr(isRequired)
 }
 
-// HandleMatrixJoinRule applies a Matrix join-rule change to WhatsApp's group
-// join approval mode. This is only called once bridgev2 routes join rule
-// events to this hook.
-func (wa *WhatsAppClient) HandleMatrixJoinRule(ctx context.Context, msg *MatrixJoinRuleChange) (bool, error) {
-	if msg == nil || msg.Portal == nil || msg.Content == nil {
-		return false, nil
-	}
+// joinApprovalFromChange maps a Matrix join-rule change to the WhatsApp join
+// approval mode it implies, treating a missing previous rule as invite.
+func joinApprovalFromChange(msg *bridgev2.MatrixJoinRuleChange) *bool {
 	prevRule := event.JoinRuleInvite
 	if msg.PrevContent != nil {
 		prevRule = msg.PrevContent.JoinRule
 	}
-	approval := joinApprovalFromJoinRule(prevRule, msg.Content.JoinRule)
+	return joinApprovalFromJoinRule(prevRule, msg.Content.JoinRule)
+}
+
+// HandleMatrixJoinRule applies a Matrix join-rule change to WhatsApp's group
+// join approval mode. Knock maps to approval being required.
+func (wa *WhatsAppClient) HandleMatrixJoinRule(ctx context.Context, msg *bridgev2.MatrixJoinRuleChange) (bool, error) {
+	if msg == nil || msg.Portal == nil || msg.Content == nil {
+		return false, nil
+	}
+	approval := joinApprovalFromChange(msg)
 	if approval == nil {
 		return false, nil
 	}

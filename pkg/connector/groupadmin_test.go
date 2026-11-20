@@ -17,16 +17,20 @@
 package connector
 
 import (
+	"context"
 	"reflect"
 	"slices"
 	"testing"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
+
+	"go.mau.fi/mautrix-whatsapp/pkg/waid"
 )
 
 func TestAdminPLAction(t *testing.T) {
@@ -230,6 +234,91 @@ func TestJoinRuleConversion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if actual := joinApprovalFromJoinRule(tc.prev, tc.current); !reflect.DeepEqual(actual, tc.expected) {
 				t.Errorf("joinApprovalFromJoinRule(%q, %q) = %v, want %v", tc.prev, tc.current, actual, tc.expected)
+			}
+		})
+	}
+}
+
+func TestJoinApprovalFromChange(t *testing.T) {
+	dmID := waid.MakePortalID(types.NewJID("15551234567", types.DefaultUserServer))
+	rule := func(r event.JoinRule) *event.JoinRulesEventContent {
+		return &event.JoinRulesEventContent{JoinRule: r}
+	}
+	tests := []struct {
+		name    string
+		prev    *event.JoinRulesEventContent
+		current event.JoinRule
+		want    *bool
+	}{
+		{"invite to knock requires approval", nil, event.JoinRuleKnock, ptrBool(true)},
+		{"knock to invite clears approval", rule(event.JoinRuleKnock), event.JoinRuleInvite, ptrBool(false)},
+		{"missing prev defaults to invite", nil, event.JoinRuleInvite, nil},
+		{"no rule change", rule(event.JoinRuleKnock), event.JoinRuleKnock, nil},
+		{"public to knock requires approval", rule(event.JoinRulePublic), event.JoinRuleKnock, ptrBool(true)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := &bridgev2.MatrixJoinRuleChange{
+				MatrixEventBase: bridgev2.MatrixEventBase[*event.JoinRulesEventContent]{
+					Content: rule(tc.current),
+					Portal:  &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: dmID}}},
+				},
+				PrevContent: tc.prev,
+			}
+			if actual := joinApprovalFromChange(msg); !reflect.DeepEqual(actual, tc.want) {
+				t.Errorf("joinApprovalFromChange() = %v, want %v", actual, tc.want)
+			}
+		})
+	}
+}
+
+func TestHandleMatrixJoinRuleIgnoresUnhandledChanges(t *testing.T) {
+	groupID := waid.MakePortalID(types.NewJID("15551234567", types.GroupServer))
+	dmID := waid.MakePortalID(types.NewJID("15557654321", types.DefaultUserServer))
+	portal := func(id networkid.PortalID) *bridgev2.Portal {
+		return &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: id}}}
+	}
+	tests := []struct {
+		name    string
+		msg     *bridgev2.MatrixJoinRuleChange
+		wantErr bool
+	}{
+		{name: "nil message"},
+		{name: "nil portal", msg: &bridgev2.MatrixJoinRuleChange{}},
+		{name: "nil content", msg: &bridgev2.MatrixJoinRuleChange{
+			MatrixEventBase: bridgev2.MatrixEventBase[*event.JoinRulesEventContent]{Portal: portal(groupID)},
+		}},
+		{name: "no rule change", msg: &bridgev2.MatrixJoinRuleChange{
+			MatrixEventBase: bridgev2.MatrixEventBase[*event.JoinRulesEventContent]{
+				Content: &event.JoinRulesEventContent{JoinRule: event.JoinRuleInvite},
+				Portal:  portal(groupID),
+			},
+			PrevContent: &event.JoinRulesEventContent{JoinRule: event.JoinRuleInvite},
+		}},
+		{name: "non-group portal", msg: &bridgev2.MatrixJoinRuleChange{
+			MatrixEventBase: bridgev2.MatrixEventBase[*event.JoinRulesEventContent]{
+				Content: &event.JoinRulesEventContent{JoinRule: event.JoinRuleKnock},
+				Portal:  portal(dmID),
+			},
+		}},
+		{name: "invalid portal ID", msg: &bridgev2.MatrixJoinRuleChange{
+			MatrixEventBase: bridgev2.MatrixEventBase[*event.JoinRulesEventContent]{
+				Content: &event.JoinRulesEventContent{JoinRule: event.JoinRuleKnock},
+				Portal:  portal("a.b.c@invalid"),
+			},
+		}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Client is nil: a call to SetGroupJoinApprovalMode would panic,
+			// so only the early-return paths are exercised here.
+			wa := &WhatsAppClient{MC: noopMCInstance}
+			changed, err := wa.HandleMatrixJoinRule(context.Background(), tc.msg)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("HandleMatrixJoinRule() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if changed {
+				t.Error("HandleMatrixJoinRule() changed = true, want false")
 			}
 		})
 	}

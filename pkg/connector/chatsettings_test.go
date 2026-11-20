@@ -379,3 +379,54 @@ func TestHandleChatSettingsIgnoresOtherSenders(t *testing.T) {
 		})
 	}
 }
+
+func TestGetCustomMatrixEventTypes(t *testing.T) {
+	got := (&WhatsAppConnector{}).GetCustomMatrixEventTypes()
+	want := []event.Type{ChatSettingsEventType}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("GetCustomMatrixEventTypes() = %v, want %v", got, want)
+	}
+}
+
+func TestHandleMatrixCustomEvent(t *testing.T) {
+	ownMXID := id.UserID("@own:example.org")
+	wa := &WhatsAppClient{UserLogin: &bridgev2.UserLogin{
+		UserLogin: &database.UserLogin{UserMXID: ownMXID},
+	}}
+	// An invalid portal ID makes HandleChatSettings fail after its sender
+	// check, so a non-nil error proves the event was routed to that handler.
+	portal := &bridgev2.Portal{Portal: &database.Portal{
+		PortalKey: networkid.PortalKey{ID: "a.b.c@invalid"},
+	}}
+	tests := []struct {
+		name      string
+		eventType event.Type
+		sender    id.UserID
+		wantRoute bool
+	}{
+		{"chat settings from own user", ChatSettingsEventType, ownMXID, true},
+		{"chat settings from other user", ChatSettingsEventType, id.UserID("@other:example.org"), false},
+		{"unrelated custom type", event.Type{Type: "com.example.other", Class: event.MessageEventType}, ownMXID, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			evt := &event.Event{
+				Type:    tt.eventType,
+				Sender:  tt.sender,
+				Content: event.Content{VeryRaw: json.RawMessage(`{"archived":true}`)},
+			}
+			err := wa.HandleMatrixCustomEvent(context.Background(), &bridgev2.MatrixCustomEvent{
+				MatrixEventBase: bridgev2.MatrixEventBase[*event.Content]{
+					Event:   evt,
+					Content: &evt.Content,
+					Portal:  portal,
+				},
+			})
+			if tt.wantRoute && err == nil {
+				t.Error("HandleMatrixCustomEvent() error = nil, want routing error")
+			} else if !tt.wantRoute && err != nil {
+				t.Errorf("HandleMatrixCustomEvent() error = %v, want nil", err)
+			}
+		})
+	}
+}

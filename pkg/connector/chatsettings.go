@@ -61,14 +61,29 @@ func init() {
 	event.TypeMap[ChatSettingsEventType] = reflect.TypeFor[ChatSettingsEventContent]()
 }
 
-// ChatSettingsHandlingNetworkAPI is implemented by network connectors that can
-// apply chat settings from Matrix. bridgev2 must route ChatSettingsEventType
-// events to HandleChatSettings (see the report accompanying this change).
-type ChatSettingsHandlingNetworkAPI interface {
-	HandleChatSettings(ctx context.Context, portal *bridgev2.Portal, evt *event.Event) error
+var (
+	_ bridgev2.CustomEventTypesProvider      = (*WhatsAppConnector)(nil)
+	_ bridgev2.CustomEventHandlingNetworkAPI = (*WhatsAppClient)(nil)
+)
+
+// GetCustomMatrixEventTypes declares the Weave-specific event types that the
+// Matrix connector should register and forward to HandleMatrixCustomEvent.
+func (wa *WhatsAppConnector) GetCustomMatrixEventTypes() []event.Type {
+	return []event.Type{ChatSettingsEventType}
 }
 
-var _ ChatSettingsHandlingNetworkAPI = (*WhatsAppClient)(nil)
+// HandleMatrixCustomEvent routes declared custom events to their handlers.
+func (wa *WhatsAppClient) HandleMatrixCustomEvent(ctx context.Context, msg *bridgev2.MatrixCustomEvent) error {
+	if msg == nil || msg.Event == nil {
+		return nil
+	}
+	switch msg.Event.Type {
+	case ChatSettingsEventType:
+		return wa.HandleChatSettings(ctx, msg.Portal, msg.Event)
+	default:
+		return nil
+	}
+}
 
 // getChatSettingsContent returns the parsed content of a chat settings event.
 func getChatSettingsContent(evt *event.Event) (*ChatSettingsEventContent, error) {

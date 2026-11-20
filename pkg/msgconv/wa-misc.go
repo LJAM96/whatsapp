@@ -206,6 +206,99 @@ func (mc *MessageConverter) convertMessageHistoryNotice(ctx context.Context, inf
 	}, msg.GetContextInfo()
 }
 
+// Call log messages in history sync used to fall through to the unknown message
+// notice. They're rendered as the same action message notice that live calls
+// produce (convertCallNotice in pkg/connector). The call log protobuf has no
+// call ID, so the ID stays the regular one derived from the history message key:
+// that keeps repeated syncs and live copies of the same message from creating
+// duplicate notices, without colliding with the fake call-notice IDs.
+type callLogOutcome uint8
+
+const (
+	callLogOutcomeMissed callLogOutcome = iota
+	callLogOutcomeDeclined
+	callLogOutcomeCompleted
+)
+
+func callLogOutcomeFromProto(outcome waE2E.CallLogMessage_CallOutcome) callLogOutcome {
+	switch outcome {
+	case waE2E.CallLogMessage_CONNECTED:
+		return callLogOutcomeCompleted
+	case waE2E.CallLogMessage_REJECTED:
+		return callLogOutcomeDeclined
+	default:
+		// MISSED, FAILED, ACCEPTED_ELSEWHERE, ONGOING and the silenced
+		// variants are all surfaced as missed calls.
+		return callLogOutcomeMissed
+	}
+}
+
+func callLogCallType(msg *waE2E.CallLogMessage) event.BeeperActionMessageCallType {
+	if msg.GetIsVideo() {
+		return event.BeeperActionMessageCallTypeVideo
+	}
+	return event.BeeperActionMessageCallTypeVoice
+}
+
+// formatCallLogDuration mirrors formatCallDuration in pkg/connector so history
+// notices use the same duration strings as live call notices.
+func formatCallLogDuration(duration time.Duration) string {
+	if duration < 0 {
+		duration = 0
+	}
+	totalSeconds := int(duration / time.Second)
+	hours, minutes, seconds := totalSeconds/3600, (totalSeconds%3600)/60, totalSeconds%60
+	if hours > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds)
+	}
+	return fmt.Sprintf("%d:%02d", minutes, seconds)
+}
+
+func formatCallLogNoticeBody(outcome callLogOutcome, callType event.BeeperActionMessageCallType, duration time.Duration, outgoing bool) string {
+	callWord := "voice"
+	if callType == event.BeeperActionMessageCallTypeVideo {
+		callWord = "video"
+	}
+	direction := "incoming"
+	if outgoing {
+		direction = "outgoing"
+	}
+	switch outcome {
+	case callLogOutcomeCompleted:
+		prefix := "Incoming"
+		if outgoing {
+			prefix = "Outgoing"
+		}
+		return fmt.Sprintf("%s %s call (%s)", prefix, callWord, formatCallLogDuration(duration))
+	case callLogOutcomeDeclined:
+		return fmt.Sprintf("Declined %s %s call", direction, callWord)
+	default:
+		return fmt.Sprintf("Missed %s %s call", direction, callWord)
+	}
+}
+
+func (mc *MessageConverter) convertCallLogMessage(ctx context.Context, info *types.MessageInfo, msg *waE2E.CallLogMessage) (*bridgev2.ConvertedMessagePart, *waE2E.ContextInfo) {
+	callType := callLogCallType(msg)
+	duration := time.Duration(msg.GetDurationSecs()) * time.Second
+	// An unset outcome reads as CONNECTED through the protobuf getter, which
+	// would claim a call happened; fall back to missed instead.
+	outcome := callLogOutcomeMissed
+	if msg.CallOutcome != nil {
+		outcome = callLogOutcomeFromProto(msg.GetCallOutcome())
+	}
+	return &bridgev2.ConvertedMessagePart{
+		Type: event.EventMessage,
+		Content: &event.MessageEventContent{
+			MsgType: event.MsgNotice,
+			Body:    formatCallLogNoticeBody(outcome, callType, duration, info.IsFromMe),
+			BeeperActionMessage: &event.BeeperActionMessage{
+				Type:     event.BeeperActionMessageCall,
+				CallType: callType,
+			},
+		},
+	}, nil
+}
+
 func (mc *MessageConverter) convertEphemeralSettingMessage(ctx context.Context, msg *waE2E.ProtocolMessage, ts time.Time, isBackfill bool) (*bridgev2.ConvertedMessagePart, *waE2E.ContextInfo) {
 	portal := getPortal(ctx)
 	portalMeta := portal.Metadata.(*waid.PortalMetadata)
@@ -317,8 +410,9 @@ func (mc *MessageConverter) convertEventMessage(ctx context.Context, msg *waE2E.
 		content = format.HTMLToContent(buf.String())
 	}
 	return &bridgev2.ConvertedMessagePart{
-		Type:    event.EventMessage,
-		Content: &content,
+		Type:       event.EventMessage,
+		Content:    &content,
+		DBMetadata: &waid.MessageMetadata{IsEvent: true},
 	}, msg.GetContextInfo()
 }
 

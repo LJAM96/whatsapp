@@ -18,6 +18,7 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -33,12 +34,14 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 
+	"go.mau.fi/mautrix-whatsapp/pkg/msgconv"
 	"go.mau.fi/mautrix-whatsapp/pkg/waid"
 )
 
@@ -87,10 +90,15 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 		success = wa.resyncBlocklist(ctx)()
 	case *events.Message:
 		success = wa.handleWAMessage(ctx, evt)
+		if isPresenceContact(evt.Info.Chat) {
+			wa.subscribeToPresence(ctx, evt.Info.Chat)
+		}
 	case *events.Receipt:
 		success = wa.handleWAReceipt(ctx, evt)
 	case *events.ChatPresence:
 		wa.handleWAChatPresence(ctx, evt)
+	case *events.Presence:
+		wa.handleWAPresence(ctx, evt)
 	case *events.UndecryptableMessage:
 		success = wa.handleWAUndecryptableMessage(ctx, evt)
 
@@ -122,6 +130,12 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 		success = wa.handleWAArchive(evt)
 	case *events.Pin:
 		success = wa.handleWAPin(evt)
+	case *events.Star:
+		success = wa.handleWAStar(ctx, evt)
+	case *events.LabelEdit:
+		success = wa.handleWALabelEdit(ctx, evt)
+	case *events.LabelAssociationChat:
+		success = wa.handleWALabelAssociationChat(ctx, evt)
 
 	case *events.HistorySync:
 		wa.UserLogin.Log.Warn().Msg("Unexpected history sync event received")
@@ -200,6 +214,7 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 			}()
 			go wa.syncRemoteProfile(ctx, nil)
 		}
+		go wa.resubscribePresences(ctx)
 	case *events.OfflineSyncPreview:
 		log.Info().
 			Int("message_count", evt.Messages).
@@ -319,6 +334,7 @@ func (wa *WhatsAppClient) handleWAMessage(ctx context.Context, evt *events.Messa
 		return false
 	}
 	parsedMessageType := getMessageType(evt.Message)
+	isEventResponse := false
 	if encReact := evt.Message.GetEncReactionMessage(); encReact != nil {
 		decrypted, err := wa.Client.DecryptReaction(ctx, evt)
 		if err != nil {
@@ -327,6 +343,26 @@ func (wa *WhatsAppClient) handleWAMessage(ctx context.Context, evt *events.Messa
 		}
 		decrypted.Key = encReact.GetTargetMessageKey()
 		evt.Message.ReactionMessage = decrypted
+	}
+	if evt.Message.GetEncEventResponseMessage() != nil {
+		response, eventKey, err := decryptEventResponse(ctx, wa.Client, evt)
+		if err != nil {
+			wa.UserLogin.Log.Err(err).Str("message_id", evt.Info.ID).Msg("Failed to decrypt event response")
+		} else if emoji := msgconv.EventResponseToEmoji(response.GetResponse()); emoji == "" {
+			wa.UserLogin.Log.Debug().
+				Str("message_id", evt.Info.ID).
+				Str("response", response.GetResponse().String()).
+				Msg("Ignoring unknown event response")
+		} else {
+			// Bridge RSVPs as reactions on the event message (upstream mautrix/whatsapp#803).
+			evt.Message.ReactionMessage = &waE2E.ReactionMessage{
+				Key:               eventKey,
+				Text:              ptr.Ptr(emoji),
+				SenderTimestampMS: ptr.Ptr(response.GetTimestampMS()),
+			}
+			parsedMessageType = "reaction"
+			isEventResponse = true
+		}
 	}
 	if encComment := evt.Message.GetEncCommentMessage(); encComment != nil {
 		decrypted, err := wa.Client.DecryptComment(ctx, evt)
@@ -377,6 +413,9 @@ func (wa *WhatsAppClient) handleWAMessage(ctx context.Context, evt *events.Messa
 			Msg("Ignoring unknown protocol message")
 		return
 	}
+	if evt.Message.GetPinInChatMessage() != nil {
+		return wa.handleWAPinInChat(ctx, evt)
+	}
 
 	dontRenderEdited := false
 	messageAssoc := evt.Message.GetMessageContextInfo().GetMessageAssociation()
@@ -420,6 +459,7 @@ func (wa *WhatsAppClient) handleWAMessage(ctx context.Context, evt *events.Messa
 		MsgEvent: evt,
 
 		parsedMessageType: parsedMessageType,
+		isEventResponse:   isEventResponse,
 		dontRenderEdited:  dontRenderEdited,
 	}
 	if evt.UnavailableRequestID != "" {
@@ -435,6 +475,52 @@ func (wa *WhatsAppClient) handleWAMessage(ctx context.Context, evt *events.Messa
 	}
 
 	return wa.UserLogin.QueueRemoteEvent(wrappedEvt).Success
+}
+
+// handleWAPinInChat mirrors a WhatsApp pin/unpin of a message into the portal's
+// m.room.pinned_events state instead of bridging the pin as a regular message.
+func (wa *WhatsAppClient) handleWAPinInChat(ctx context.Context, evt *events.Message) bool {
+	portal, err := wa.Main.Bridge.GetExistingPortalByKey(ctx, (&MessageInfoWrapper{Info: evt.Info, wa: wa}).GetPortalKey())
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to get portal for pin in chat event")
+		return false
+	} else if portal == nil || portal.MXID == "" {
+		zerolog.Ctx(ctx).Debug().Msg("Ignoring pin in chat event for unbridged portal")
+		return true
+	}
+	targetID := msgconv.KeyToMessageID(ctx, wa.Client, evt.Info.Chat, evt.Info.Sender, evt.Message.GetPinInChatMessage().GetKey())
+	if targetID == "" {
+		zerolog.Ctx(ctx).Warn().Msg("Ignoring pin in chat event with invalid target message key")
+		return true
+	}
+	target, err := wa.Main.Bridge.DB.Message.GetFirstPartByID(ctx, portal.Receiver, targetID)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Str("target_message_id", string(targetID)).Msg("Failed to get pinned message from database")
+		return false
+	} else if target == nil {
+		zerolog.Ctx(ctx).Debug().Str("target_message_id", string(targetID)).Msg("Ignoring pin of unbridged message")
+		return true
+	}
+	mx, ok := wa.Main.Bridge.Matrix.(bridgev2.MatrixConnectorWithArbitraryRoomState)
+	if !ok {
+		zerolog.Ctx(ctx).Warn().Msg("Matrix connector doesn't support fetching state, can't bridge pin in chat event")
+		return true
+	}
+	prevEvt, err := mx.GetStateEvent(ctx, portal.MXID, event.StatePinnedEvents, "")
+	if err != nil && !errors.Is(err, mautrix.MNotFound) {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to get current pinned events")
+		return false
+	}
+	content, changed := msgconv.PinInChatToMatrix(prevEvt, evt.Message, target.MXID, evt.Info.Timestamp)
+	if !changed {
+		return true
+	}
+	_, err = wa.Main.Bridge.Bot.SendState(ctx, portal.MXID, event.StatePinnedEvents, "", content, evt.Info.Timestamp)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to update pinned events")
+		return false
+	}
+	return true
 }
 
 func makeHDMediaReplacementEdit(message *waE2E.Message, parentKey *waCommon.MessageKey) (*waE2E.ProtocolMessage, bool) {
@@ -583,6 +669,23 @@ func (wa *WhatsAppClient) handleWAReceipt(ctx context.Context, evt *events.Recei
 	return res.Success
 }
 
+// chatPresenceToTyping converts a WhatsApp chat presence update into a bridgev2
+// typing type and timeout.
+//
+// WhatsApp uses media=audio to distinguish recording a voice message from
+// typing text. There is no Matrix representation for that distinction: m.typing
+// only carries user_ids (event.TypingEventContent), and bridgev2 drops non-text
+// typing types when marking a ghost as typing (ASIntent.MarkTyping). Audio
+// recording is therefore reported as a plain text typing notification, which is
+// the only form that currently reaches Matrix.
+func chatPresenceToTyping(evt *events.ChatPresence) (bridgev2.TypingType, time.Duration) {
+	timeout := 15 * time.Second
+	if evt.State == types.ChatPresencePaused {
+		timeout = 0
+	}
+	return bridgev2.TypingTypeText, timeout
+}
+
 func (wa *WhatsAppClient) handleWAChatPresence(ctx context.Context, evt *events.ChatPresence) {
 	if evt.Chat.Server == types.DefaultUserServer && evt.Sender.ToNonAD() == evt.Chat {
 		if evt.SenderAlt.IsEmpty() {
@@ -593,14 +696,7 @@ func (wa *WhatsAppClient) handleWAChatPresence(ctx context.Context, evt *events.
 			evt.Chat = evt.Sender.ToNonAD()
 		}
 	}
-	typingType := bridgev2.TypingTypeText
-	timeout := 15 * time.Second
-	if evt.Media == types.ChatPresenceMediaAudio {
-		typingType = bridgev2.TypingTypeRecordingMedia
-	}
-	if evt.State == types.ChatPresencePaused {
-		timeout = 0
-	}
+	typingType, timeout := chatPresenceToTyping(evt)
 
 	wa.UserLogin.QueueRemoteEvent(&simplevent.Typing{
 		EventMeta: simplevent.EventMeta{

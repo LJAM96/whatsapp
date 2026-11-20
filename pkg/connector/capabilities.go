@@ -54,8 +54,10 @@ func (wa *WhatsAppConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilit
 }
 
 func (wa *WhatsAppConnector) GetBridgeInfoVersion() (info, caps int) {
-	return 1, 11
+	return 1, 12
 }
+
+var waViewOnceLimit = &event.BeeperViewLimitedMedia{Type: "count", Count: 1}
 
 const WAMaxFileSize = 2000 * 1024 * 1024
 const EditMaxAge = 15 * time.Minute
@@ -69,7 +71,7 @@ func supportedIfFFmpeg() event.CapabilitySupportLevel {
 }
 
 func capID() string {
-	base := "fi.mau.whatsapp.capabilities.2026_11_17"
+	base := "fi.mau.whatsapp.capabilities.2026_11_20"
 	if ffmpeg.Supported() {
 		return base + "+ffmpeg"
 	}
@@ -105,6 +107,8 @@ var whatsappCaps = &event.RoomFeatures{
 			Caption:          event.CapLevelFullySupported,
 			MaxCaptionLength: MaxTextLength,
 			MaxSize:          WAMaxFileSize,
+
+			ViewLimitedTypes: []*event.BeeperViewLimitedMedia{waViewOnceLimit},
 		},
 		event.MsgAudio: {
 			MimeTypes: map[string]event.CapabilitySupportLevel{
@@ -116,6 +120,8 @@ var whatsappCaps = &event.RoomFeatures{
 			},
 			Caption: event.CapLevelDropped,
 			MaxSize: WAMaxFileSize,
+
+			ViewLimitedTypes: []*event.BeeperViewLimitedMedia{waViewOnceLimit},
 		},
 		event.CapMsgVoice: {
 			MimeTypes: map[string]event.CapabilitySupportLevel{
@@ -124,6 +130,8 @@ var whatsappCaps = &event.RoomFeatures{
 			},
 			Caption: event.CapLevelDropped,
 			MaxSize: WAMaxFileSize,
+
+			ViewLimitedTypes: []*event.BeeperViewLimitedMedia{waViewOnceLimit},
 		},
 		event.CapMsgSticker: {
 			MimeTypes: map[string]event.CapabilitySupportLevel{
@@ -144,6 +152,8 @@ var whatsappCaps = &event.RoomFeatures{
 			Caption:          event.CapLevelFullySupported,
 			MaxCaptionLength: MaxTextLength,
 			MaxSize:          WAMaxFileSize,
+
+			ViewLimitedTypes: []*event.BeeperViewLimitedMedia{waViewOnceLimit},
 		},
 		event.MsgVideo: {
 			MimeTypes: map[string]event.CapabilitySupportLevel{
@@ -155,6 +165,8 @@ var whatsappCaps = &event.RoomFeatures{
 			Caption:          event.CapLevelFullySupported,
 			MaxCaptionLength: MaxTextLength,
 			MaxSize:          WAMaxFileSize,
+
+			ViewLimitedTypes: []*event.BeeperViewLimitedMedia{waViewOnceLimit},
 		},
 		event.MsgFile: {
 			MimeTypes: map[string]event.CapabilitySupportLevel{

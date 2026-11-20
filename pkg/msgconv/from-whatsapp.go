@@ -193,27 +193,27 @@ func (mc *MessageConverter) ToMatrix(
 	case waMsg.RichResponseMessage != nil:
 		part, contextInfo = mc.convertRichResponseMessage(ctx, waMsg.RichResponseMessage, waMsg)
 	case waMsg.ImageMessage != nil:
-		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.ImageMessage, "photo", info, isViewOnce, previouslyConvertedPart)
+		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.ImageMessage, "photo", info, isViewOnce, previouslyConvertedPart, false)
 	case waMsg.StickerMessage != nil:
-		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.StickerMessage, "sticker", info, isViewOnce, previouslyConvertedPart)
+		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.StickerMessage, "sticker", info, isViewOnce, previouslyConvertedPart, false)
 	case waMsg.VideoMessage != nil:
-		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.VideoMessage, "video attachment", info, isViewOnce, previouslyConvertedPart)
+		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.VideoMessage, "video attachment", info, isViewOnce, previouslyConvertedPart, false)
 	case waMsg.PtvMessage != nil:
-		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.PtvMessage, "video message", info, isViewOnce, previouslyConvertedPart)
+		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.PtvMessage, "video message", info, isViewOnce, previouslyConvertedPart, true)
 	case waMsg.AudioMessage != nil:
 		typeName := "audio attachment"
 		if waMsg.AudioMessage.GetPTT() {
 			typeName = "voice message"
 		}
-		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.AudioMessage, typeName, info, isViewOnce, previouslyConvertedPart)
+		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.AudioMessage, typeName, info, isViewOnce, previouslyConvertedPart, false)
 	case waMsg.DocumentMessage != nil:
-		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.DocumentMessage, "file attachment", info, isViewOnce, previouslyConvertedPart)
+		part, contextInfo = mc.convertMediaMessage(ctx, waMsg.DocumentMessage, "file attachment", info, isViewOnce, previouslyConvertedPart, false)
 	case waMsg.AlbumMessage != nil:
 		part, contextInfo = mc.convertAlbumMessage(ctx, waMsg.AlbumMessage)
 	case waMsg.LocationMessage != nil:
 		part, contextInfo = mc.convertLocationMessage(ctx, waMsg.LocationMessage)
 	case waMsg.LiveLocationMessage != nil:
-		part, contextInfo = mc.convertLiveLocationMessage(ctx, waMsg.LiveLocationMessage)
+		part, contextInfo = mc.convertLiveLocationMessage(ctx, portal, intent, waMsg.LiveLocationMessage, info, isBackfill)
 	case waMsg.ContactMessage != nil:
 		part, contextInfo = mc.convertContactMessage(ctx, waMsg.ContactMessage)
 	case waMsg.ContactsArrayMessage != nil:
@@ -224,6 +224,8 @@ func (mc *MessageConverter) ToMatrix(
 		part, contextInfo = mc.convertGroupInviteMessage(ctx, info, waMsg.GroupInviteMessage)
 	case waMsg.MessageHistoryNotice != nil:
 		part, contextInfo = mc.convertMessageHistoryNotice(ctx, info, waMsg.MessageHistoryNotice)
+	case waMsg.CallLogMesssage != nil:
+		part, contextInfo = mc.convertCallLogMessage(ctx, info, waMsg.CallLogMesssage)
 	case waMsg.ProtocolMessage != nil && waMsg.ProtocolMessage.GetType() == waE2E.ProtocolMessage_EPHEMERAL_SETTING:
 		part, contextInfo = mc.convertEphemeralSettingMessage(ctx, waMsg.ProtocolMessage, info.Timestamp, isBackfill)
 	case waMsg.EncCommentMessage != nil:
@@ -233,6 +235,7 @@ func (mc *MessageConverter) ToMatrix(
 	}
 
 	part.Content.Mentions = &event.Mentions{}
+	markViewOnce(part, isViewOnce, mc.DisableViewOnce)
 	if part.DBMetadata == nil {
 		part.DBMetadata = &waid.MessageMetadata{}
 	}
@@ -252,6 +255,14 @@ func (mc *MessageConverter) ToMatrix(
 
 	cm := &bridgev2.ConvertedMessage{
 		Parts: []*bridgev2.ConvertedMessagePart{part},
+	}
+	// Event messages also get an .ics attachment so they can be added to a
+	// calendar from Matrix (upstream mautrix/whatsapp#789). Skip edits, which
+	// only use the first part.
+	if waMsg.EventMessage != nil && getEditTargetID(ctx) == "" {
+		if icalPart := mc.eventICalPart(ctx, portal, info, waMsg.EventMessage); icalPart != nil {
+			cm.Parts = append(cm.Parts, icalPart)
+		}
 	}
 	if contextInfo.GetExpiration() > 0 {
 		cm.Disappear.Timer = time.Duration(contextInfo.GetExpiration()) * time.Second

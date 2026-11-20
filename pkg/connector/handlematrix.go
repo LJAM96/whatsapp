@@ -48,22 +48,23 @@ import (
 )
 
 var (
-	_ bridgev2.TypingHandlingNetworkAPI         = (*WhatsAppClient)(nil)
-	_ bridgev2.EditHandlingNetworkAPI           = (*WhatsAppClient)(nil)
-	_ bridgev2.ReactionHandlingNetworkAPI       = (*WhatsAppClient)(nil)
-	_ bridgev2.RedactionHandlingNetworkAPI      = (*WhatsAppClient)(nil)
-	_ bridgev2.ReadReceiptHandlingNetworkAPI    = (*WhatsAppClient)(nil)
-	_ bridgev2.PollHandlingNetworkAPI           = (*WhatsAppClient)(nil)
-	_ bridgev2.DisappearTimerChangingNetworkAPI = (*WhatsAppClient)(nil)
-	_ bridgev2.MembershipHandlingNetworkAPI     = (*WhatsAppClient)(nil)
-	_ bridgev2.RoomNameHandlingNetworkAPI       = (*WhatsAppClient)(nil)
-	_ bridgev2.RoomTopicHandlingNetworkAPI      = (*WhatsAppClient)(nil)
-	_ bridgev2.RoomAvatarHandlingNetworkAPI     = (*WhatsAppClient)(nil)
-	_ bridgev2.MuteHandlingNetworkAPI           = (*WhatsAppClient)(nil)
-	_ bridgev2.TagHandlingNetworkAPI            = (*WhatsAppClient)(nil)
-	_ bridgev2.MarkedUnreadHandlingNetworkAPI   = (*WhatsAppClient)(nil)
-	_ bridgev2.DeleteChatHandlingNetworkAPI     = (*WhatsAppClient)(nil)
-	_ bridgev2.UserBlockingNetworkAPI           = (*WhatsAppClient)(nil)
+	_ bridgev2.TypingHandlingNetworkAPI           = (*WhatsAppClient)(nil)
+	_ bridgev2.EditHandlingNetworkAPI             = (*WhatsAppClient)(nil)
+	_ bridgev2.ReactionHandlingNetworkAPI         = (*WhatsAppClient)(nil)
+	_ bridgev2.RedactionHandlingNetworkAPI        = (*WhatsAppClient)(nil)
+	_ bridgev2.ReadReceiptHandlingNetworkAPI      = (*WhatsAppClient)(nil)
+	_ bridgev2.ViewLimitedMediaHandlingNetworkAPI = (*WhatsAppClient)(nil)
+	_ bridgev2.PollHandlingNetworkAPI             = (*WhatsAppClient)(nil)
+	_ bridgev2.DisappearTimerChangingNetworkAPI   = (*WhatsAppClient)(nil)
+	_ bridgev2.MembershipHandlingNetworkAPI       = (*WhatsAppClient)(nil)
+	_ bridgev2.RoomNameHandlingNetworkAPI         = (*WhatsAppClient)(nil)
+	_ bridgev2.RoomTopicHandlingNetworkAPI        = (*WhatsAppClient)(nil)
+	_ bridgev2.RoomAvatarHandlingNetworkAPI       = (*WhatsAppClient)(nil)
+	_ bridgev2.MuteHandlingNetworkAPI             = (*WhatsAppClient)(nil)
+	_ bridgev2.TagHandlingNetworkAPI              = (*WhatsAppClient)(nil)
+	_ bridgev2.MarkedUnreadHandlingNetworkAPI     = (*WhatsAppClient)(nil)
+	_ bridgev2.DeleteChatHandlingNetworkAPI       = (*WhatsAppClient)(nil)
+	_ bridgev2.UserBlockingNetworkAPI             = (*WhatsAppClient)(nil)
 )
 
 func (wa *WhatsAppClient) HandleMatrixPollStart(ctx context.Context, msg *bridgev2.MatrixPollStart) (result *bridgev2.MatrixMessageResponse, retErr error) {
@@ -194,6 +195,29 @@ func (wa *WhatsAppClient) HandleMatrixReaction(ctx context.Context, msg *bridgev
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse portal ID: %w", err)
 	}
+	// Reactions with the RSVP emojis on an event message are sent as WhatsApp
+	// event responses instead of plain reactions (upstream mautrix/whatsapp#803).
+	if meta, ok := msg.TargetMessage.Metadata.(*waid.MessageMetadata); ok && meta.IsEvent {
+		emoji := msg.Content.RelatesTo.Key
+		if msg.PreHandleResp != nil {
+			emoji = msg.PreHandleResp.Emoji
+		}
+		if response, ok := msgconv.EmojiToEventResponse(emoji); ok {
+			waMsg, err := buildEventResponseMessage(ctx, wa, messageID, response, time.UnixMilli(msg.Event.Timestamp))
+			if err != nil {
+				return nil, wrapConversionError(fmt.Errorf("failed to build event response: %w", err))
+			}
+			defer wa.mcTrack(msg, time.Now(), &retErr)
+			resp, err := wa.Client.SendMessage(ctx, portalJID, waMsg, whatsmeow.SendRequestExtra{})
+			zerolog.Ctx(ctx).Trace().Any("response", resp).Msg("WhatsApp event response send result")
+			return &database.Reaction{
+				Metadata: &waid.ReactionMetadata{
+					SenderDeviceID:  wa.JID.Device,
+					IsEventResponse: true,
+				},
+			}, wa.wrapSendError(err)
+		}
+	}
 	reactionMsg := &waE2E.Message{
 		ReactionMessage: &waE2E.ReactionMessage{
 			Key:               wa.messageIDToKey(messageID),
@@ -232,6 +256,11 @@ func (wa *WhatsAppClient) HandleMatrixReactionRemove(ctx context.Context, msg *b
 	portalJID, err := waid.ParsePortalID(msg.Portal.ID)
 	if err != nil {
 		return fmt.Errorf("failed to parse portal ID: %w", err)
+	}
+	if meta, ok := msg.TargetReaction.Metadata.(*waid.ReactionMetadata); ok && meta.IsEventResponse {
+		// WhatsApp has no "remove RSVP" response, so there is nothing to send.
+		zerolog.Ctx(ctx).Debug().Str("message_id", string(messageID.ID)).Msg("Ignoring removal of event response reaction")
+		return nil
 	}
 
 	reactionMsg := &waE2E.Message{
@@ -367,24 +396,60 @@ func (wa *WhatsAppClient) HandleMatrixReadReceipt(ctx context.Context, receipt *
 	return wrapWhatsAppError(err)
 }
 
+func (wa *WhatsAppClient) HandleMatrixViewLimitedMedia(ctx context.Context, msg *bridgev2.MatrixViewLimitedMedia) error {
+	// The media has already been downloaded from WhatsApp and uploaded to Matrix.
+	// There is nothing to revoke on the WhatsApp side: bridgev2 handles the
+	// Matrix-side redaction after this handler returns. Match the native app by
+	// sending a played receipt so the sender sees that the media was opened.
+	parsed, err := waid.ParseMessageID(msg.Message.ID)
+	if err != nil {
+		zerolog.Ctx(ctx).Debug().Err(err).Msg("Failed to parse message ID for view-once receipt")
+		return nil
+	}
+	if parsed.Sender.IsEmpty() || wa.IsOwnJID(parsed.Sender) {
+		return nil
+	}
+	portalJID, err := waid.ParsePortalID(msg.Portal.ID)
+	if err != nil {
+		return fmt.Errorf("failed to parse portal ID: %w", err)
+	}
+	err = wa.Client.MarkRead(ctx, []types.MessageID{parsed.ID}, time.Now(), portalJID, parsed.Sender, types.ReceiptTypePlayed)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to mark view-once media as played")
+	}
+	return wrapWhatsAppError(err)
+}
+
+// matrixTypingToChatPresence converts a bridgev2 Matrix typing notification to
+// a WhatsApp chat presence. The bool is false for typing types that should be
+// ignored entirely.
+//
+// Matrix m.typing events don't carry a status type (event.TypingEventContent
+// only has user_ids), so bridgev2 always reports TypingTypeText today. The
+// recording media mapping is kept so that sending media=audio works as soon as
+// bridgev2 can propagate a recording typing type from Matrix.
+func matrixTypingToChatPresence(msg *bridgev2.MatrixTyping) (types.ChatPresence, types.ChatPresenceMedia, bool) {
+	chatPresence := types.ChatPresencePaused
+	if msg.IsTyping {
+		chatPresence = types.ChatPresenceComposing
+	}
+	var mediaPresence types.ChatPresenceMedia
+	switch msg.Type {
+	case bridgev2.TypingTypeRecordingMedia:
+		mediaPresence = types.ChatPresenceMediaAudio
+	case bridgev2.TypingTypeUploadingMedia:
+		return "", "", false
+	}
+	return chatPresence, mediaPresence, true
+}
+
 func (wa *WhatsAppClient) HandleMatrixTyping(ctx context.Context, msg *bridgev2.MatrixTyping) (retErr error) {
 	portalJID, err := waid.ParsePortalID(msg.Portal.ID)
 	if err != nil {
 		return err
 	}
-	var chatPresence types.ChatPresence
-	var mediaPresence types.ChatPresenceMedia
-	if msg.IsTyping {
-		chatPresence = types.ChatPresenceComposing
-	} else {
-		chatPresence = types.ChatPresencePaused
-	}
-	switch msg.Type {
-	case bridgev2.TypingTypeText:
-		mediaPresence = types.ChatPresenceMediaText
-	case bridgev2.TypingTypeRecordingMedia:
-		mediaPresence = types.ChatPresenceMediaAudio
-	case bridgev2.TypingTypeUploadingMedia:
+	chatPresence, mediaPresence, ok := matrixTypingToChatPresence(msg)
+	if !ok {
 		return nil
 	}
 

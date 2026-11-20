@@ -49,7 +49,17 @@ type UserLoginMetadata struct {
 
 	Blocklist *types.Blocklist `json:"blocklist,omitempty"`
 
+	// Labels maps WhatsApp business label IDs to their last known metadata.
+	// The chats are tracked so renames and deletions can update the matching room tags.
+	Labels map[string]WALabel `json:"labels,omitempty"`
+
 	MData json.RawMessage `json:"mdata,omitempty"`
+}
+
+type WALabel struct {
+	Name  string      `json:"name"`
+	Color int32       `json:"color,omitempty"`
+	Chats []types.JID `json:"chats,omitempty"`
 }
 
 type PushKeys struct {
@@ -100,6 +110,7 @@ type MessageMetadata struct {
 	FailedMediaMeta  json.RawMessage   `json:"media_meta,omitempty"`
 	DirectMediaMeta  json.RawMessage   `json:"direct_media_meta,omitempty"`
 	IsMatrixPoll     bool              `json:"is_matrix_poll,omitzero"`
+	IsEvent          bool              `json:"is_event,omitzero"`
 	Edits            []types.MessageID `json:"edits,omitempty"`
 }
 
@@ -120,10 +131,12 @@ func (mm *MessageMetadata) CopyFrom(other any) {
 		mm.GroupInvite = otherMM.GroupInvite
 	}
 	mm.IsMatrixPoll = mm.IsMatrixPoll || otherMM.IsMatrixPoll
+	mm.IsEvent = mm.IsEvent || otherMM.IsEvent
 }
 
 type ReactionMetadata struct {
-	SenderDeviceID uint16 `json:"sender_device_id,omitempty"`
+	SenderDeviceID  uint16 `json:"sender_device_id,omitempty"`
+	IsEventResponse bool   `json:"is_event_response,omitzero"`
 }
 
 type PortalMetadata struct {

@@ -357,3 +357,69 @@ func fnJoin(ce *commands.Event) {
 		ce.Reply("That doesn't look like a WhatsApp invite link")
 	}
 }
+
+var cmdStar = &commands.FullHandler{
+	Func: func(ce *commands.Event) { setStarred(ce, true) },
+	Name: "star",
+	Help: commands.HelpMeta{
+		Section:     commands.HelpSectionGeneral,
+		Description: "Star the message you replied to on WhatsApp.",
+	},
+	RequiresLogin:  true,
+	RequiresPortal: true,
+}
+
+var cmdUnstar = &commands.FullHandler{
+	Func: func(ce *commands.Event) { setStarred(ce, false) },
+	Name: "unstar",
+	Help: commands.HelpMeta{
+		Section:     commands.HelpSectionGeneral,
+		Description: "Unstar the message you replied to on WhatsApp.",
+	},
+	RequiresLogin:  true,
+	RequiresPortal: true,
+}
+
+func setStarred(ce *commands.Event, starred bool) {
+	action := "star"
+	if !starred {
+		action = "unstar"
+	}
+	if len(ce.ReplyTo) == 0 {
+		ce.Reply("You must reply to the message you want to %s.", action)
+		return
+	}
+	message, err := ce.Bridge.DB.Message.GetPartByMXID(ce.Ctx, ce.ReplyTo)
+	if err != nil {
+		ce.Log.Err(err).Stringer("reply_to_mxid", ce.ReplyTo).Msg("Failed to get reply target for star command")
+		ce.Reply("Failed to get reply event")
+		return
+	} else if message == nil {
+		ce.Reply("Reply event not found")
+		return
+	}
+	parsed, err := waid.ParseMessageID(message.ID)
+	if err != nil {
+		ce.Log.Err(err).Str("message_id", string(message.ID)).Msg("Failed to parse message ID for star command")
+		ce.Reply("That doesn't look like a bridged WhatsApp message.")
+		return
+	}
+	login := ce.User.GetDefaultLogin()
+	if login == nil {
+		ce.Reply("Login not found")
+		return
+	}
+	wa := login.Client.(*WhatsAppClient)
+	err = wa.Client.SendAppState(ce.Ctx, appstate.BuildStar(parsed.Chat, parsed.Sender, parsed.ID, wa.IsOwnJID(parsed.Sender), starred))
+	if err != nil {
+		ce.Log.Err(err).Msg("Failed to send star app state")
+		ce.Reply("Failed to %s message: %v", action, err)
+		return
+	}
+	if ce.Portal != nil {
+		if err = wa.setStarredEvent(ce.Ctx, ce.Portal.MXID, ce.ReplyTo, starred); err != nil {
+			ce.Log.Warn().Err(err).Msg("Failed to update local starred account data")
+		}
+	}
+	ce.React("⭐")
+}

@@ -302,8 +302,9 @@ func (wa *WhatsAppClient) wrapGroupInfo(ctx context.Context, info *types.GroupIn
 	)
 	syncAllMembers := wa.Main.Config.MaxMemberSync < 0 || len(info.Participants) < wa.Main.Config.MaxMemberSync
 	wrapped := &bridgev2.ChatInfo{
-		Name:  ptr.Ptr(info.Name),
-		Topic: ptr.Ptr(info.Topic),
+		Name:     ptr.Ptr(info.Name),
+		Topic:    ptr.Ptr(info.Topic),
+		JoinRule: joinRuleForApprovalMode(info.IsJoinApprovalRequired),
 		Members: &bridgev2.ChatMemberList{
 			IsFull:           !info.IsIncognito && !info.IsParent && syncAllMembers,
 			TotalMemberCount: len(info.Participants),
@@ -384,8 +385,11 @@ func (wa *WhatsAppClient) wrapGroupInfo(ctx context.Context, info *types.GroupIn
 
 func (wa *WhatsAppClient) wrapGroupInfoChange(ctx context.Context, evt *events.GroupInfo) *bridgev2.ChatInfoChange {
 	var changes *bridgev2.ChatInfo
-	if evt.Name != nil || evt.Topic != nil || evt.Ephemeral != nil || evt.Unlink != nil || evt.Link != nil {
+	if evt.Name != nil || evt.Topic != nil || evt.Ephemeral != nil || evt.Unlink != nil || evt.Link != nil || evt.MembershipApprovalMode != nil {
 		changes = &bridgev2.ChatInfo{}
+		if evt.MembershipApprovalMode != nil {
+			changes.JoinRule = joinRuleForApprovalMode(evt.MembershipApprovalMode.IsJoinApprovalRequired)
+		}
 		if evt.Name != nil {
 			changes.Name = &evt.Name.Name
 		}

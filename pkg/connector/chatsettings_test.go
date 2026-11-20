@@ -382,7 +382,7 @@ func TestHandleChatSettingsIgnoresOtherSenders(t *testing.T) {
 
 func TestGetCustomMatrixEventTypes(t *testing.T) {
 	got := (&WhatsAppConnector{}).GetCustomMatrixEventTypes()
-	want := []event.Type{ChatSettingsEventType}
+	want := []event.Type{ChatSettingsEventType, StarEventType, LabelEventType}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("GetCustomMatrixEventTypes() = %v, want %v", got, want)
 	}
@@ -393,11 +393,9 @@ func TestHandleMatrixCustomEvent(t *testing.T) {
 	wa := &WhatsAppClient{UserLogin: &bridgev2.UserLogin{
 		UserLogin: &database.UserLogin{UserMXID: ownMXID},
 	}}
-	// An invalid portal ID makes HandleChatSettings fail after its sender
-	// check, so a non-nil error proves the event was routed to that handler.
-	portal := &bridgev2.Portal{Portal: &database.Portal{
-		PortalKey: networkid.PortalKey{ID: "a.b.c@invalid"},
-	}}
+	// Invalid content makes each handler fail after its sender check, so a
+	// non-nil error proves the event was routed to that handler.
+	raw := json.RawMessage(`{"archived":`)
 	tests := []struct {
 		name      string
 		eventType event.Type
@@ -405,7 +403,11 @@ func TestHandleMatrixCustomEvent(t *testing.T) {
 		wantRoute bool
 	}{
 		{"chat settings from own user", ChatSettingsEventType, ownMXID, true},
+		{"star from own user", StarEventType, ownMXID, true},
+		{"label from own user", LabelEventType, ownMXID, true},
 		{"chat settings from other user", ChatSettingsEventType, id.UserID("@other:example.org"), false},
+		{"star from other user", StarEventType, id.UserID("@other:example.org"), false},
+		{"label from other user", LabelEventType, id.UserID("@other:example.org"), false},
 		{"unrelated custom type", event.Type{Type: "com.example.other", Class: event.MessageEventType}, ownMXID, false},
 	}
 	for _, tt := range tests {
@@ -413,13 +415,12 @@ func TestHandleMatrixCustomEvent(t *testing.T) {
 			evt := &event.Event{
 				Type:    tt.eventType,
 				Sender:  tt.sender,
-				Content: event.Content{VeryRaw: json.RawMessage(`{"archived":true}`)},
+				Content: event.Content{VeryRaw: raw},
 			}
 			err := wa.HandleMatrixCustomEvent(context.Background(), &bridgev2.MatrixCustomEvent{
 				MatrixEventBase: bridgev2.MatrixEventBase[*event.Content]{
 					Event:   evt,
 					Content: &evt.Content,
-					Portal:  portal,
 				},
 			})
 			if tt.wantRoute && err == nil {

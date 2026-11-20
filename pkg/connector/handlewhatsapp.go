@@ -28,6 +28,7 @@ import (
 	"go.mau.fi/util/ptr"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
+	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -94,10 +95,16 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 		success = wa.handleWAUndecryptableMessage(ctx, evt)
 
 	case *events.CallOffer:
-		success = wa.handleWACallStart(ctx, evt.GroupJID, evt.CallCreator, evt.CallCreatorAlt, evt.CallID, "", evt.Timestamp)
+		wa.trackCallOffer(ctx, &evt.BasicCallMeta, callTypeFromOfferData(evt.Data))
 	case *events.CallOfferNotice:
-		success = wa.handleWACallStart(ctx, evt.GroupJID, evt.CallCreator, evt.CallCreatorAlt, evt.CallID, evt.Type, evt.Timestamp)
-	case *events.CallTerminate, *events.CallRelayLatency, *events.CallAccept, *events.UnknownCallEvent:
+		wa.trackCallOffer(ctx, &evt.BasicCallMeta, callTypeFromMedia(evt.Media))
+	case *events.CallAccept:
+		wa.updateTrackedCall(&evt.BasicCallMeta, true)
+	case *events.CallReject:
+		success = wa.finishTrackedCall(ctx, &evt.BasicCallMeta, true, "")
+	case *events.CallTerminate:
+		success = wa.finishTrackedCall(ctx, &evt.BasicCallMeta, false, evt.Reason)
+	case *events.CallRelayLatency, *events.UnknownCallEvent:
 		// ignore
 	case *events.IdentityChange:
 		wa.handleWAIdentityChange(ctx, evt)
@@ -630,10 +637,67 @@ func (wa *WhatsAppClient) handleWALogout(ctx context.Context, reason events.Conn
 
 const callEventMaxAge = 15 * time.Minute
 
-func (wa *WhatsAppClient) handleWACallStart(ctx context.Context, group, sender, senderAlt types.JID, id, callType string, ts time.Time) bool {
-	if !wa.Main.Config.CallStartNotices || time.Since(ts) > callEventMaxAge {
-		return true
+// trackedCall holds the details from a call offer that are needed to write the
+// notice once the call finishes. Accept/reject/terminate events only carry the
+// call ID, so they have to be correlated with the offer by that ID.
+type trackedCall struct {
+	callID     string
+	chat       types.JID
+	sender     types.JID
+	callType   event.BeeperActionMessageCallType
+	outgoing   bool
+	startTime  time.Time
+	acceptTime time.Time
+	accepted   bool
+	expiresAt  time.Time
+}
+
+type callNoticeData struct {
+	Body     string
+	CallType event.BeeperActionMessageCallType
+}
+
+type callOutcome uint8
+
+const (
+	callOutcomeMissed callOutcome = iota
+	callOutcomeDeclined
+	callOutcomeCompleted
+)
+
+// callTypeFromOfferData returns the call type advertised in a 1:1 call offer.
+// WhatsApp includes a <video> child for video calls and only <audio> children
+// for voice calls (see whatsmeow's own OfferCall implementation).
+func callTypeFromOfferData(data *waBinary.Node) event.BeeperActionMessageCallType {
+	if data == nil {
+		return ""
 	}
+	if _, ok := data.GetOptionalChildByTag("video"); ok {
+		return event.BeeperActionMessageCallTypeVideo
+	}
+	return event.BeeperActionMessageCallTypeVoice
+}
+
+// callTypeFromMedia maps the media field of a CallOfferNotice ("audio" or
+// "video") to the call type used by Beeper action messages.
+func callTypeFromMedia(media string) event.BeeperActionMessageCallType {
+	switch media {
+	case "video":
+		return event.BeeperActionMessageCallTypeVideo
+	case "audio":
+		return event.BeeperActionMessageCallTypeVoice
+	default:
+		return ""
+	}
+}
+
+// trackCallOffer remembers a call so its final event can produce one notice.
+// The offer itself intentionally does not create a message.
+func (wa *WhatsAppClient) trackCallOffer(ctx context.Context, meta *types.BasicCallMeta, callType event.BeeperActionMessageCallType) {
+	if !wa.Main.Config.CallStartNotices || meta.CallID == "" || time.Since(meta.Timestamp) > callEventMaxAge {
+		return
+	}
+	sender, senderAlt := meta.CallCreator, meta.CallCreatorAlt
 	if sender.Server == types.DefaultUserServer && senderAlt.IsEmpty() {
 		senderAlt, _ = wa.GetStore().LIDs.GetLIDForPN(ctx, sender)
 	}
@@ -641,44 +705,188 @@ func (wa *WhatsAppClient) handleWACallStart(ctx context.Context, group, sender, 
 		wa.UserLogin.Log.Debug().
 			Stringer("lid", senderAlt).
 			Stringer("pn", sender).
-			Str("call_id", id).
+			Str("call_id", meta.CallID).
 			Msg("Forced phone number caller to LID in incoming call")
 		sender, senderAlt = senderAlt, sender
 	}
-	chat := group
-	if chat.IsEmpty() {
+	outgoing := wa.IsOwnJID(sender) || wa.IsOwnJID(senderAlt) || wa.IsOwnJID(meta.From)
+	chat := meta.GroupJID
+	if chat.IsEmpty() && !outgoing {
 		chat = sender
+	} else if chat.IsEmpty() {
+		// Outgoing calls don't carry the peer on the offer event. The accept or
+		// terminate event usually does, so try those before giving up.
+		if !meta.From.IsEmpty() && !wa.IsOwnJID(meta.From) {
+			chat = meta.From
+		} else if !senderAlt.IsEmpty() && !wa.IsOwnJID(senderAlt) {
+			chat = senderAlt
+		}
 	}
-	return wa.UserLogin.QueueRemoteEvent(&simplevent.Message[string]{
+	now := time.Now()
+	wa.callNoticeLock.Lock()
+	defer wa.callNoticeLock.Unlock()
+	if wa.callNotices == nil {
+		wa.callNotices = make(map[string]*trackedCall)
+	}
+	for id, tracked := range wa.callNotices {
+		if !tracked.expiresAt.After(now) {
+			delete(wa.callNotices, id)
+		}
+	}
+	wa.callNotices[meta.CallID] = &trackedCall{
+		callID:    meta.CallID,
+		chat:      chat,
+		sender:    sender,
+		callType:  callType,
+		outgoing:  outgoing,
+		startTime: meta.Timestamp,
+		expiresAt: now.Add(callEventMaxAge),
+	}
+}
+
+// updateTrackedCall records that a tracked call was accepted. It is safe to
+// call for unknown call IDs (e.g. calls offered before the bridge connected).
+func (wa *WhatsAppClient) updateTrackedCall(meta *types.BasicCallMeta, accepted bool) {
+	wa.callNoticeLock.Lock()
+	defer wa.callNoticeLock.Unlock()
+	call := wa.callNotices[meta.CallID]
+	if call == nil {
+		return
+	}
+	if call.chat.IsEmpty() && !meta.From.IsEmpty() && !wa.IsOwnJID(meta.From) {
+		call.chat = meta.From
+	}
+	if accepted {
+		call.accepted = true
+		call.acceptTime = meta.Timestamp
+	}
+}
+
+// consumeTrackedCall removes the tracked call, so only the first final event
+// (terminate or reject) produces a notice for a given call ID.
+func (wa *WhatsAppClient) consumeTrackedCall(meta *types.BasicCallMeta) *trackedCall {
+	wa.callNoticeLock.Lock()
+	defer wa.callNoticeLock.Unlock()
+	call := wa.callNotices[meta.CallID]
+	if call == nil {
+		return nil
+	}
+	delete(wa.callNotices, meta.CallID)
+	if call.chat.IsEmpty() && !meta.From.IsEmpty() && !wa.IsOwnJID(meta.From) {
+		call.chat = meta.From
+	}
+	return call
+}
+
+func (wa *WhatsAppClient) finishTrackedCall(ctx context.Context, meta *types.BasicCallMeta, rejected bool, reason string) bool {
+	call := wa.consumeTrackedCall(meta)
+	if call == nil {
+		return true
+	}
+
+	outcome := callOutcomeMissed
+	if call.accepted {
+		outcome = callOutcomeCompleted
+	} else if rejected || isDeclinedCallReason(reason) {
+		outcome = callOutcomeDeclined
+	}
+	return wa.queueCallNotice(ctx, call, outcome, meta.Timestamp)
+}
+
+func isDeclinedCallReason(reason string) bool {
+	switch strings.ToLower(reason) {
+	case "declined", "reject", "rejected", "busy":
+		return true
+	default:
+		return false
+	}
+}
+
+func formatCallDuration(duration time.Duration) string {
+	if duration < 0 {
+		duration = 0
+	}
+	totalSeconds := int(duration / time.Second)
+	hours, minutes, seconds := totalSeconds/3600, (totalSeconds%3600)/60, totalSeconds%60
+	if hours > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds)
+	}
+	return fmt.Sprintf("%d:%02d", minutes, seconds)
+}
+
+func formatCallNoticeBody(outcome callOutcome, callType event.BeeperActionMessageCallType, duration time.Duration) string {
+	lower, upper := "voice", "Voice"
+	if callType == event.BeeperActionMessageCallTypeVideo {
+		lower, upper = "video", "Video"
+	}
+	switch outcome {
+	case callOutcomeCompleted:
+		return fmt.Sprintf("%s call (%s)", upper, formatCallDuration(duration))
+	case callOutcomeDeclined:
+		return fmt.Sprintf("Declined %s call", lower)
+	default:
+		return fmt.Sprintf("Missed %s call", lower)
+	}
+}
+
+func callNoticeForFinishedCall(call *trackedCall, outcome callOutcome, endTime time.Time) callNoticeData {
+	var duration time.Duration
+	if !call.acceptTime.IsZero() && !endTime.IsZero() {
+		duration = endTime.Sub(call.acceptTime)
+	} else if !call.startTime.IsZero() && !endTime.IsZero() {
+		duration = endTime.Sub(call.startTime)
+	}
+	return callNoticeData{
+		Body:     formatCallNoticeBody(outcome, call.callType, duration),
+		CallType: call.callType,
+	}
+}
+
+func (wa *WhatsAppClient) queueCallNotice(ctx context.Context, call *trackedCall, outcome callOutcome, endTime time.Time) bool {
+	if call.chat.IsEmpty() {
+		zerolog.Ctx(ctx).Debug().
+			Str("call_id", call.callID).
+			Msg("Not sending call notice: no peer JID for portal")
+		return true
+	}
+	sender := call.sender
+	if call.outgoing {
+		sender = wa.GetLID()
+		if sender.IsEmpty() {
+			sender = wa.JID
+		}
+	}
+	data := callNoticeForFinishedCall(call, outcome, endTime)
+	ts := call.startTime
+	if ts.IsZero() {
+		ts = endTime
+	}
+	return wa.UserLogin.QueueRemoteEvent(&simplevent.Message[callNoticeData]{
 		EventMeta: simplevent.EventMeta{
 			Type:         bridgev2.RemoteEventMessage,
 			LogContext:   nil,
-			PortalKey:    wa.makeWAPortalKey(chat),
+			PortalKey:    wa.makeWAPortalKey(call.chat),
 			Sender:       wa.makeEventSender(ctx, sender),
 			CreatePortal: true,
 			Timestamp:    ts,
 			StreamOrder:  ts.Unix(),
 		},
-		Data:               callType,
-		ID:                 waid.MakeFakeMessageID(chat, sender, "call-"+id),
-		ConvertMessageFunc: convertCallStart,
+		Data:               data,
+		ID:                 waid.MakeFakeMessageID(call.chat, sender, "call-"+call.callID),
+		ConvertMessageFunc: convertCallNotice,
 	}).Success
 }
 
-func convertCallStart(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, callType string) (*bridgev2.ConvertedMessage, error) {
-	text := "Incoming call. Use the WhatsApp app to answer."
-	if callType != "" {
-		text = fmt.Sprintf("Incoming %s call. Use the WhatsApp app to answer.", callType)
-	}
+func convertCallNotice(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, data callNoticeData) (*bridgev2.ConvertedMessage, error) {
 	return &bridgev2.ConvertedMessage{
 		Parts: []*bridgev2.ConvertedMessagePart{{
 			Type: event.EventMessage,
 			Content: &event.MessageEventContent{
-				MsgType: event.MsgText,
-				Body:    text,
+				MsgType: event.MsgNotice,
+				Body:    data.Body,
 				BeeperActionMessage: &event.BeeperActionMessage{
 					Type:     event.BeeperActionMessageCall,
-					CallType: event.BeeperActionMessageCallType(callType),
+					CallType: data.CallType,
 				},
 			},
 		}},

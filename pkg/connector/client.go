@@ -52,6 +52,7 @@ func (wa *WhatsAppConnector) LoadUserLogin(ctx context.Context, login *bridgev2.
 		historySyncWakeup:         make(chan struct{}, 1),
 		historySyncQueued:         exsync.NewMap[types.JID, time.Time](),
 		resyncQueue:               make(map[types.JID]resyncQueueItem),
+		callNotices:               make(map[string]*trackedCall),
 		directMediaRetries:        make(map[networkid.MessageID]*directMediaRetry),
 		mediaRetryLock:            semaphore.NewWeighted(wa.Config.HistorySync.MediaRequests.MaxAsyncHandle),
 		pushNamesSynced:           exsync.NewEvent(),
@@ -129,6 +130,9 @@ type WhatsAppClient struct {
 	pushNamesSynced    *exsync.Event
 	lastPresence       types.Presence
 	blocklistLock      sync.Mutex
+
+	callNoticeLock sync.Mutex
+	callNotices    map[string]*trackedCall
 
 	disableNewsletter bool
 

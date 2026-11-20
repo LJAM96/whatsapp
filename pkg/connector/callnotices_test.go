@@ -19,6 +19,8 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -256,6 +258,71 @@ func TestFinishedCallProducesOneNotice(t *testing.T) {
 	}
 	if got := wa.consumeTrackedCall(&endMeta); got != nil {
 		t.Errorf("duplicate final event returned a call: %+v", got)
+	}
+}
+
+func TestCallStartAndHistoryNoticesUseDistinctIDs(t *testing.T) {
+	chat := types.NewJID("15551234567", types.HiddenUserServer)
+	sender := types.NewJID("15557654321", types.HiddenUserServer)
+	startID := callStartMessageID(chat, sender, "CALL-1")
+	historyID := callHistoryMessageID(chat, sender, "CALL-1")
+	if startID == historyID {
+		t.Errorf("start and history notices share the ID %q", startID)
+	}
+	if !strings.HasPrefix(string(startID), fmt.Sprintf("fake:%s:%s:call-", chat, sender)) {
+		t.Errorf("unexpected start notice ID %q", startID)
+	}
+	if !strings.HasPrefix(string(historyID), fmt.Sprintf("fake:%s:%s:call-history-", chat, sender)) {
+		t.Errorf("unexpected history notice ID %q", historyID)
+	}
+}
+
+func TestAcceptedCallSurvivesPruneUntilTerminate(t *testing.T) {
+	chat := types.NewJID("15551234567", types.HiddenUserServer)
+	oldOffer := &types.BasicCallMeta{
+		CallID:      "CALL-OLD",
+		CallCreator: chat,
+		Timestamp:   time.Now().Add(-30 * time.Minute),
+	}
+	wa := &WhatsAppClient{
+		Main:            &WhatsAppConnector{Config: Config{CallHistoryNotices: true}},
+		callNotices:     make(map[string]*trackedCall),
+		previousOwnLIDs: exsync.NewSet[types.JID](),
+	}
+	// The offer's 15-minute deadline has already passed, but the call was
+	// accepted, so accepting it must give it a longer retention.
+	wa.callNotices[oldOffer.CallID] = &trackedCall{
+		callID:    oldOffer.CallID,
+		chat:      chat,
+		sender:    chat,
+		callType:  event.BeeperActionMessageCallTypeVoice,
+		startTime: oldOffer.Timestamp,
+		expiresAt: oldOffer.Timestamp.Add(callEventMaxAge),
+	}
+	acceptMeta := *oldOffer
+	acceptMeta.Timestamp = oldOffer.Timestamp.Add(3 * time.Second)
+	wa.updateTrackedCall(&acceptMeta, true)
+
+	// A new offer triggers pruning. The accepted call must survive it.
+	newOffer := &types.BasicCallMeta{
+		CallID:      "CALL-NEW",
+		CallCreator: types.NewJID("15557654321", types.HiddenUserServer),
+		Timestamp:   time.Now(),
+	}
+	wa.trackCallOffer(context.Background(), newOffer, event.BeeperActionMessageCallTypeVideo)
+	if wa.callNotices[oldOffer.CallID] == nil {
+		t.Fatal("accepted call older than the offer max age was pruned")
+	}
+
+	// Terminating the accepted call still produces a completed-call notice.
+	endMeta := *oldOffer
+	endMeta.Timestamp = acceptMeta.Timestamp.Add(45 * time.Second)
+	call := wa.consumeTrackedCall(&endMeta)
+	if call == nil {
+		t.Fatal("accepted call was not available on terminate")
+	}
+	if got := callNoticeForFinishedCall(call, callOutcomeCompleted, endMeta.Timestamp).Body; got != "Voice call (0:45)" {
+		t.Errorf("notice body = %q, want %q", got, "Voice call (0:45)")
 	}
 }
 

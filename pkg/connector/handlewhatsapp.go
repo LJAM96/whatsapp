@@ -637,7 +637,10 @@ func (wa *WhatsAppClient) handleWALogout(ctx context.Context, reason events.Conn
 	})
 }
 
-const callEventMaxAge = 15 * time.Minute
+const (
+	callEventMaxAge    = 15 * time.Minute
+	callAcceptedMaxAge = 12 * time.Hour
+)
 
 // shouldSendCallStartNotice reports whether the immediate incoming-call notice
 // should be sent. It is gated solely by call_start_notices.
@@ -650,6 +653,18 @@ func shouldSendCallStartNotice(config *Config, ts time.Time) bool {
 // call_history_notices, independently of call_start_notices.
 func shouldTrackCallHistory(config *Config, meta *types.BasicCallMeta) bool {
 	return config.CallHistoryNotices && meta.CallID != "" && time.Since(meta.Timestamp) <= callEventMaxAge
+}
+
+// callStartMessageID is the deduplication ID for the immediate incoming-call
+// notice. Finished-call history notices use a separate namespace so that
+// enabling both notice types doesn't make the history notice get dropped as
+// already bridged.
+func callStartMessageID(chat, sender types.JID, id string) networkid.MessageID {
+	return waid.MakeFakeMessageID(chat, sender, "call-"+id)
+}
+
+func callHistoryMessageID(chat, sender types.JID, id string) networkid.MessageID {
+	return waid.MakeFakeMessageID(chat, sender, "call-history-"+id)
 }
 
 func (wa *WhatsAppClient) handleWACallStart(ctx context.Context, group, sender, senderAlt types.JID, id, callType string, ts time.Time) bool {
@@ -682,7 +697,7 @@ func (wa *WhatsAppClient) handleWACallStart(ctx context.Context, group, sender, 
 			StreamOrder:  ts.Unix(),
 		},
 		Data:               callType,
-		ID:                 waid.MakeFakeMessageID(chat, sender, "call-"+id),
+		ID:                 callStartMessageID(chat, sender, id),
 		ConvertMessageFunc: convertCallStart,
 	}).Success
 }
@@ -829,6 +844,10 @@ func (wa *WhatsAppClient) updateTrackedCall(meta *types.BasicCallMeta, accepted 
 	if accepted {
 		call.accepted = true
 		call.acceptTime = meta.Timestamp
+		// A call that's in progress must not be pruned by the offer max age.
+		// Keep it until terminate, with a separate long safety retention so a
+		// lost terminate event can't leave the entry in the map forever.
+		call.expiresAt = time.Now().Add(callAcceptedMaxAge)
 	}
 }
 
@@ -942,7 +961,7 @@ func (wa *WhatsAppClient) queueCallNotice(ctx context.Context, call *trackedCall
 			StreamOrder:  ts.Unix(),
 		},
 		Data:               data,
-		ID:                 waid.MakeFakeMessageID(call.chat, sender, "call-"+call.callID),
+		ID:                 callHistoryMessageID(call.chat, sender, call.callID),
 		ConvertMessageFunc: convertCallNotice,
 	}).Success
 }

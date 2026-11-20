@@ -67,6 +67,14 @@ func (mc *MessageConverter) convertMediaMessage(
 	if viewOnceMsg, ok := msg.(MediaMessageWithViewOnce); ok && viewOnceMsg.GetViewOnce() {
 		isViewOnce = true
 	}
+	// The inline flag above can turn a message into view-once media even when
+	// the callers didn't see a view-once wrapper (ToMatrix only passes the
+	// wrapper state in). Apply the marker here so the effective state isn't
+	// lost. Covering all return paths with a deferred call also keeps the
+	// cached-part path (media edits/retries) correct.
+	defer func() {
+		markViewOnce(part, isViewOnce, mc.DisableViewOnce)
+	}()
 	if mc.DisableViewOnce && isViewOnce {
 		body := "You received a view once message. For added privacy, you can only open it on the WhatsApp app."
 		if messageInfo.IsFromMe {

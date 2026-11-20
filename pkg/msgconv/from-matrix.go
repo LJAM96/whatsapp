@@ -167,6 +167,9 @@ func (mc *MessageConverter) ToWhatsApp(
 	if evt.Type == event.EventSticker {
 		content.MsgType = event.MessageType(event.EventSticker.Type)
 	}
+	if viewLimitedVideoNote(content) {
+		return nil, nil, fmt.Errorf("%w: view-once video notes", bridgev2.ErrUnsupportedMessageType)
+	}
 
 	message := &waE2E.Message{}
 	contextInfo := mc.generateContextInfo(ctx, replyTo, content.RelatesTo, portal, content.BeeperDisappearingTimer, mc.allowRoomMention(ctx, portal, origSender, content.Mentions))
@@ -239,6 +242,20 @@ func (mc *MessageConverter) ToWhatsApp(
 		}
 	}
 	return message, extra, nil
+}
+
+// viewLimitedVideoNote reports whether an outgoing m.video is both a WhatsApp
+// video note (VideoNoteField, sent as ptvMessage) and view-limited. waE2E only
+// defines generic view-once wrappers and inline flags for image/video/audio
+// media, and the newer consumer-application ViewOnceMessage oneof only allows
+// image or video, so there is no clearly supported view-once PTV message.
+// Reject the combination rather than sending unrestricted media.
+func viewLimitedVideoNote(content *event.MessageEventContent) bool {
+	if content.MsgType != event.MsgVideo || content.BeeperViewLimited == nil || content.Info == nil {
+		return false
+	}
+	isVideoNote, _ := content.Info.Extra[VideoNoteField].(bool)
+	return isVideoNote
 }
 
 // applyViewOnce wraps a WhatsApp media message in a view-once envelope. WhatsApp

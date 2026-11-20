@@ -17,13 +17,64 @@
 package msgconv
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
+	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/event"
 )
+
+func TestConvertMediaMessageInlineViewOnce(t *testing.T) {
+	tests := []struct {
+		name       string
+		inline     bool
+		outer      bool
+		disable    bool
+		wantMarker bool
+	}{
+		{name: "inline view once flag", inline: true, wantMarker: true},
+		{name: "inline and wrapper flags", inline: true, outer: true, wantMarker: true},
+		{name: "wrapper flag only", outer: true, wantMarker: true},
+		{name: "no flag"},
+		{name: "inline flag with view once disabled", inline: true, disable: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mc := &MessageConverter{DisableViewOnce: tt.disable}
+			msg := &waE2E.VideoMessage{
+				Mimetype: proto.String("video/mp4"),
+				ViewOnce: proto.Bool(tt.inline),
+			}
+			cachedPart := &bridgev2.ConvertedMessagePart{Content: &event.MessageEventContent{
+				URL: "mxc://example.org/media",
+			}}
+			part, _ := mc.convertMediaMessage(
+				context.Background(), msg, "video attachment", &types.MessageInfo{},
+				tt.outer, cachedPart, false,
+			)
+			if part == nil {
+				t.Fatal("convertMediaMessage returned nil part")
+			}
+			limit := part.Content.BeeperViewLimited
+			if !tt.wantMarker {
+				if limit != nil {
+					t.Errorf("BeeperViewLimited = %+v, want nil", limit)
+				}
+				return
+			}
+			if limit == nil {
+				t.Fatal("BeeperViewLimited is nil, want count=1 limit")
+			}
+			if limit.Type != "count" || limit.Count != 1 {
+				t.Errorf("BeeperViewLimited = %+v, want {count 1}", limit)
+			}
+		})
+	}
+}
 
 func TestPrepareMediaMessageVideoNote(t *testing.T) {
 	tests := []struct {

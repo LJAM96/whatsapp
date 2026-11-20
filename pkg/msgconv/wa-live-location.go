@@ -85,6 +85,17 @@ func liveLocationShareKey(portal *bridgev2.Portal, intent bridgev2.MatrixAPI) st
 	return portal.MXID.String() + "\x00" + intent.GetMXID().String()
 }
 
+// liveLocationShareActive reports whether a beacon_info can still anchor new
+// beacons. Clients consider a share live until ts+timeout, so an expired share
+// must be replaced with a fresh one instead of being reused.
+func liveLocationShareActive(info event.BeaconInfoEventContent) bool {
+	if !info.Live || info.Timeout <= 0 || info.GetTimestamp() <= 0 {
+		return false
+	}
+	expiresAt := time.UnixMilli(info.GetTimestamp()).Add(time.Duration(info.Timeout) * time.Millisecond)
+	return time.Now().Before(expiresAt)
+}
+
 // recoverLiveLocationShare reads an active share from the room state. This is
 // needed after a bridge restart, when the in-memory map is empty. A stopped or
 // expired beacon_info is ignored so a fresh start doesn't get attached to it.
@@ -102,7 +113,7 @@ func recoverLiveLocationShare(ctx context.Context, portal *bridgev2.Portal, inte
 	if !info.Live || info.Timeout <= 0 || info.GetTimestamp() <= 0 {
 		return nil
 	}
-	if expiresAt := time.UnixMilli(info.GetTimestamp()).Add(time.Duration(info.Timeout) * time.Millisecond); !time.Now().Before(expiresAt) {
+	if !liveLocationShareActive(*info) {
 		return nil
 	}
 	return &liveLocationShare{InfoEventID: stateEvt.ID, Info: *info}
@@ -112,6 +123,12 @@ func (mc *MessageConverter) getLiveLocationShare(ctx context.Context, portal *br
 	key := liveLocationShareKey(portal, intent)
 	mc.liveLocationLock.Lock()
 	share := mc.liveLocations[key]
+	if share != nil && !liveLocationShareActive(share.Info) {
+		// An expired cached share must not anchor new beacons. Drop it so the
+		// caller starts a fresh beacon_info and keeps the m.location fallback.
+		delete(mc.liveLocations, key)
+		share = nil
+	}
 	mc.liveLocationLock.Unlock()
 	if share != nil {
 		return share

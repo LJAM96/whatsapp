@@ -27,8 +27,12 @@ call_history_notices: true
 # Should another user's cryptographic identity changing send a message to Matrix?
 identity_change_notices: false
 # Should the bridge mark you as online on WhatsApp when you send typing notifications?
-# Full presence bridging is not supported.
 send_presence_on_typing: false
+# Should the bridge subscribe to the presence of recently active DM contacts and bridge
+# their online/last-seen state to Matrix presence for their ghosts?
+# This is disabled by default. Presence is only bridged if your own WhatsApp privacy
+# settings allow other users to see your last seen time, and only up to 100 contacts.
+bridge_contact_presence: false
 # Should WhatsApp status messages be bridged into a Matrix room?
 enable_status_broadcast: true
 # Should sending WhatsApp status messages be allowed?

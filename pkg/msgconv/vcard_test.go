@@ -83,20 +83,20 @@ func TestIsVCardFile(t *testing.T) {
 
 func TestParseVCards(t *testing.T) {
 	tests := []struct {
-		name          string
-		data          string
-		wantOK        bool
-		wantCount     int
-		wantNames     []string
-		wantRawPrefix string
+		name      string
+		data      string
+		wantOK    bool
+		wantCount int
+		wantNames []string
+		wantRaw   string
 	}{
 		{
-			name:          "single card CRLF",
-			data:          "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:John Doe\r\nTEL:+123456789\r\nEND:VCARD\r\n",
-			wantOK:        true,
-			wantCount:     1,
-			wantNames:     []string{"John Doe"},
-			wantRawPrefix: "BEGIN:VCARD\r\nVERSION:3.0\r\n",
+			name:      "single card CRLF",
+			data:      "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:John Doe\r\nTEL:+123456789\r\nEND:VCARD\r\n",
+			wantOK:    true,
+			wantCount: 1,
+			wantNames: []string{"John Doe"},
+			wantRaw:   "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:John Doe\r\nTEL:+123456789\r\nEND:VCARD\r\n",
 		},
 		{
 			name:      "single card LF",
@@ -148,8 +148,51 @@ func TestParseVCards(t *testing.T) {
 			wantNames: []string{""},
 		},
 		{
+			name:      "whitespace between cards",
+			data:      "BEGIN:VCARD\r\nFN:John Doe\r\nEND:VCARD\r\n\r\nBEGIN:VCARD\r\nFN:Jane Roe\r\nEND:VCARD\r\n",
+			wantOK:    true,
+			wantCount: 2,
+			wantNames: []string{"John Doe", "Jane Roe"},
+		},
+		{
 			name:      "missing END:VCARD",
 			data:      "BEGIN:VCARD\r\nFN:John Doe\r\n",
+			wantOK:    false,
+			wantCount: 0,
+		},
+		{
+			name:      "later card missing END:VCARD",
+			data:      "BEGIN:VCARD\r\nFN:John Doe\r\nEND:VCARD\r\nBEGIN:VCARD\r\nFN:Jane Roe\r\n",
+			wantOK:    false,
+			wantCount: 0,
+		},
+		{
+			name:      "BEGIN inside open card",
+			data:      "BEGIN:VCARD\r\nFN:John Doe\r\nBEGIN:VCARD\r\nFN:Jane Roe\r\nEND:VCARD\r\n",
+			wantOK:    false,
+			wantCount: 0,
+		},
+		{
+			name:      "END without BEGIN after a card",
+			data:      "BEGIN:VCARD\r\nFN:John Doe\r\nEND:VCARD\r\nEND:VCARD\r\n",
+			wantOK:    false,
+			wantCount: 0,
+		},
+		{
+			name:      "END without BEGIN at start",
+			data:      "END:VCARD\r\nBEGIN:VCARD\r\nFN:John Doe\r\nEND:VCARD\r\n",
+			wantOK:    false,
+			wantCount: 0,
+		},
+		{
+			name:      "non-whitespace content outside cards",
+			data:      "BEGIN:VCARD\r\nFN:John Doe\r\nEND:VCARD\r\njunk\r\n",
+			wantOK:    false,
+			wantCount: 0,
+		},
+		{
+			name:      "non-whitespace content before first card",
+			data:      "junk\r\nBEGIN:VCARD\r\nFN:John Doe\r\nEND:VCARD\r\n",
 			wantOK:    false,
 			wantCount: 0,
 		},
@@ -183,8 +226,8 @@ func TestParseVCards(t *testing.T) {
 					t.Errorf("card %d displayName = %q, want %q", i, card.displayName, tt.wantNames[i])
 				}
 			}
-			if tt.wantRawPrefix != "" && cards[0].raw != tt.wantRawPrefix+"FN:John Doe\r\nTEL:+123456789\r\nEND:VCARD" {
-				t.Errorf("unexpected raw card: %q", cards[0].raw)
+			if tt.wantRaw != "" && cards[0].raw != tt.wantRaw {
+				t.Errorf("raw card = %q, want %q", cards[0].raw, tt.wantRaw)
 			}
 		})
 	}
@@ -195,6 +238,47 @@ func TestParseVCardsInvalidUTF8(t *testing.T) {
 	invalid := append([]byte(valid[:len(valid)-1]), 0xff)
 	if cards, ok := parseVCards(invalid); ok || len(cards) != 0 {
 		t.Errorf("parseVCards(invalid UTF-8) = (%v, %v), want (nil, false)", cards, ok)
+	}
+}
+
+func TestSplitVCardLinesUnfolding(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want []string
+	}{
+		{
+			name: "two leading spaces keep one",
+			data: "NOTE:Meet at\r\n  noon\r\nEND:VCARD",
+			want: []string{"NOTE:Meet at noon", "END:VCARD"},
+		},
+		{
+			name: "three leading spaces keep two",
+			data: "NOTE:a\r\n   b",
+			want: []string{"NOTE:a  b"},
+		},
+		{
+			name: "one leading tab removed",
+			data: "NOTE:Meet at\r\n\tnoon\r\n",
+			want: []string{"NOTE:Meet atnoon"},
+		},
+		{
+			name: "mixed line endings",
+			data: "A\r\n  b\n\tc\rD",
+			want: []string{"A bc", "D"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lines := splitVCardLines(tt.data)
+			actual := make([]string, 0, len(lines))
+			for _, line := range lines {
+				actual = append(actual, line.text)
+			}
+			if strings.Join(actual, "\n") != strings.Join(tt.want, "\n") {
+				t.Errorf("unfolded lines = %q, want %q", actual, tt.want)
+			}
+		})
 	}
 }
 
@@ -209,7 +293,9 @@ func TestConstructVCardMessage(t *testing.T) {
 		fileName     string
 		wantOK       bool
 		wantSingle   string
+		wantVcard    string
 		wantContacts []string
+		wantVcards   []string
 		wantArray    string
 	}{
 		{
@@ -218,6 +304,7 @@ func TestConstructVCardMessage(t *testing.T) {
 			fileName:   "contacts.vcf",
 			wantOK:     true,
 			wantSingle: "John Doe",
+			wantVcard:  singleCard,
 		},
 		{
 			name:         "multiple contacts",
@@ -225,7 +312,11 @@ func TestConstructVCardMessage(t *testing.T) {
 			fileName:     "contacts.vcf",
 			wantOK:       true,
 			wantContacts: []string{"John Doe", "Jane Roe"},
-			wantArray:    "John Doe, Jane Roe",
+			wantVcards: []string{
+				singleCard,
+				"BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Jane Roe\r\nEND:VCARD\r\n",
+			},
+			wantArray: "John Doe, Jane Roe",
 		},
 		{
 			name:       "filename fallback",
@@ -233,6 +324,54 @@ func TestConstructVCardMessage(t *testing.T) {
 			fileName:   "business-cards.vcf",
 			wantOK:     true,
 			wantSingle: "business-cards.vcf",
+		},
+		{
+			name:       "folded note is sent byte-for-byte",
+			data:       "BEGIN:VCARD\r\nNOTE:Meet at\r\n  noon\r\nEND:VCARD\r\n",
+			fileName:   "contacts.vcf",
+			wantOK:     true,
+			wantSingle: "contacts.vcf",
+			wantVcard:  "BEGIN:VCARD\r\nNOTE:Meet at\r\n  noon\r\nEND:VCARD\r\n",
+		},
+		{
+			name:       "LF line endings are preserved",
+			data:       "BEGIN:VCARD\nFN:John Doe\nEND:VCARD\n",
+			fileName:   "contacts.vcf",
+			wantOK:     true,
+			wantSingle: "John Doe",
+			wantVcard:  "BEGIN:VCARD\nFN:John Doe\nEND:VCARD\n",
+		},
+		{
+			name:       "BOM is stripped",
+			data:       "\ufeffBEGIN:VCARD\r\nFN:John Doe\r\nEND:VCARD\r\n",
+			fileName:   "contacts.vcf",
+			wantOK:     true,
+			wantSingle: "John Doe",
+			wantVcard:  "BEGIN:VCARD\r\nFN:John Doe\r\nEND:VCARD\r\n",
+		},
+		{
+			name:     "later card missing END falls back to document",
+			data:     singleCard + "BEGIN:VCARD\r\nFN:Jane Roe\r\n",
+			fileName: "contacts.vcf",
+			wantOK:   false,
+		},
+		{
+			name:     "BEGIN inside open card falls back to document",
+			data:     "BEGIN:VCARD\r\nFN:John Doe\r\nBEGIN:VCARD\r\nEND:VCARD\r\n",
+			fileName: "contacts.vcf",
+			wantOK:   false,
+		},
+		{
+			name:     "END without BEGIN falls back to document",
+			data:     "END:VCARD\r\nBEGIN:VCARD\r\nFN:John Doe\r\nEND:VCARD\r\n",
+			fileName: "contacts.vcf",
+			wantOK:   false,
+		},
+		{
+			name:     "content outside cards falls back to document",
+			data:     singleCard + "junk\r\n",
+			fileName: "contacts.vcf",
+			wantOK:   false,
 		},
 		{
 			name:     "invalid data",
@@ -269,8 +408,11 @@ func TestConstructVCardMessage(t *testing.T) {
 				if msg.GetContactMessage().GetContextInfo() != contextInfo {
 					t.Errorf("ContactMessage contextInfo was not set")
 				}
-				if !strings.HasPrefix(msg.GetContactMessage().GetVcard(), "BEGIN:VCARD\r\n") {
+				if !strings.HasPrefix(msg.GetContactMessage().GetVcard(), "BEGIN:VCARD") {
 					t.Errorf("vcard field does not contain the original card: %q", msg.GetContactMessage().GetVcard())
+				}
+				if tt.wantVcard != "" && msg.GetContactMessage().GetVcard() != tt.wantVcard {
+					t.Errorf("vcard = %q, want %q", msg.GetContactMessage().GetVcard(), tt.wantVcard)
 				}
 				if msg.GetContactsArrayMessage() != nil {
 					t.Errorf("unexpected ContactsArrayMessage")
@@ -287,6 +429,9 @@ func TestConstructVCardMessage(t *testing.T) {
 			for i, contact := range arr.GetContacts() {
 				if contact.GetDisplayName() != tt.wantContacts[i] {
 					t.Errorf("contact %d displayName = %q, want %q", i, contact.GetDisplayName(), tt.wantContacts[i])
+				}
+				if i < len(tt.wantVcards) && contact.GetVcard() != tt.wantVcards[i] {
+					t.Errorf("contact %d vcard = %q, want %q", i, contact.GetVcard(), tt.wantVcards[i])
 				}
 			}
 			if arr.GetDisplayName() != tt.wantArray {

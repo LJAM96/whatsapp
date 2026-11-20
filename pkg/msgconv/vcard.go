@@ -51,56 +51,94 @@ type parsedVCard struct {
 	displayName string
 }
 
-// parseVCards splits vCard data into individual cards. The data must be valid
-// UTF-8 and start with a BEGIN:VCARD line (an optional UTF-8 BOM and leading
-// whitespace are ignored).
+// vcardLine is a logical (unfolded) line with offsets into the original text.
+// The offsets let callers send the original bytes unchanged instead of the
+// unfolded form, which is only used for validation and name extraction.
+type vcardLine struct {
+	text      string
+	start     int
+	nextStart int
+}
+
+// splitVCardLines splits text into logical lines. Line endings are normalized
+// for parsing, and folded lines are unfolded per RFC 6350 section 3.2: exactly
+// one leading space or tab is removed from a continuation line before it is
+// appended to the previous line. The offsets refer to the original text so
+// callers can send that text byte-for-byte.
+func splitVCardLines(text string) []vcardLine {
+	var lines []vcardLine
+	for start := 0; start < len(text); {
+		end := start
+		for end < len(text) && text[end] != '\r' && text[end] != '\n' {
+			end++
+		}
+		content := text[start:end]
+		nextStart := end
+		if end < len(text) {
+			if text[end] == '\r' && end+1 < len(text) && text[end+1] == '\n' {
+				nextStart = end + 2
+			} else {
+				nextStart = end + 1
+			}
+		}
+		if len(lines) > 0 && len(content) > 0 && (content[0] == ' ' || content[0] == '\t') {
+			last := &lines[len(lines)-1]
+			last.text += content[1:]
+			last.nextStart = nextStart
+		} else {
+			lines = append(lines, vcardLine{text: content, start: start, nextStart: nextStart})
+		}
+		start = nextStart
+	}
+	return lines
+}
+
+// parseVCards splits vCard data into individual cards. The file must be valid
+// UTF-8 and consist only of a sequence of complete cards (an optional UTF-8
+// BOM and any whitespace outside cards are ignored). Any malformed structure -
+// a nested BEGIN, an END without a BEGIN, an unclosed card, or non-whitespace
+// content outside a card - makes the whole file fail to parse so the original
+// file is sent as a document instead of a subset of cards.
 func parseVCards(data []byte) ([]parsedVCard, bool) {
 	if !utf8.Valid(data) {
 		return nil, false
 	}
-	text := strings.TrimSpace(strings.TrimPrefix(string(data), "\ufeff"))
-	if !strings.HasPrefix(strings.ToUpper(text), "BEGIN:VCARD") {
-		return nil, false
-	}
+	text := strings.TrimPrefix(string(data), "\ufeff")
 	var cards []parsedVCard
 	var current []string
-	for _, rawLine := range splitVCardLines(text) {
-		line := strings.TrimSpace(rawLine)
+	var cardStart int
+	open := false
+	for _, line := range splitVCardLines(text) {
+		trimmed := strings.TrimSpace(line.text)
 		switch {
-		case strings.EqualFold(line, "BEGIN:VCARD"):
-			current = []string{line}
-		case strings.EqualFold(line, "END:VCARD"):
-			if len(current) > 0 {
-				current = append(current, line)
-				cards = append(cards, parsedVCard{
-					raw:         strings.Join(current, "\r\n"),
-					displayName: displayNameFromVCard(current),
-				})
-				current = nil
+		case strings.EqualFold(trimmed, "BEGIN:VCARD"):
+			if open {
+				return nil, false
 			}
-		case len(current) > 0:
-			current = append(current, line)
+			open = true
+			cardStart = line.start
+			current = []string{trimmed}
+		case strings.EqualFold(trimmed, "END:VCARD"):
+			if !open {
+				return nil, false
+			}
+			open = false
+			current = append(current, trimmed)
+			cards = append(cards, parsedVCard{
+				raw:         text[cardStart:line.nextStart],
+				displayName: displayNameFromVCard(current),
+			})
+			current = nil
+		case open:
+			current = append(current, trimmed)
+		case trimmed != "":
+			return nil, false
 		}
 	}
-	if len(cards) == 0 {
+	if open || len(cards) == 0 {
 		return nil, false
 	}
 	return cards, true
-}
-
-// splitVCardLines normalizes line endings and unfolds folded vCard lines.
-func splitVCardLines(text string) []string {
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-	var lines []string
-	for _, line := range strings.Split(text, "\n") {
-		if len(lines) > 0 && (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) {
-			lines[len(lines)-1] += strings.TrimLeft(line, " \t")
-		} else {
-			lines = append(lines, line)
-		}
-	}
-	return lines
 }
 
 // displayNameFromVCard returns the FN value, falling back to N.
@@ -164,7 +202,9 @@ func unescapeVCard(value string) string {
 }
 
 // constructVCardMessage builds a native WhatsApp contact message from vCard
-// data. The filename is used as a last-resort display name.
+// data. Each card is sent byte-for-byte as it appeared in the input (with only
+// a leading BOM removed); unfolding is used solely for parsing. The filename
+// is used as a last-resort display name.
 func constructVCardMessage(data []byte, fileName string, contextInfo *waE2E.ContextInfo) (*waE2E.Message, bool) {
 	if len(data) > maxVCardSize {
 		return nil, false

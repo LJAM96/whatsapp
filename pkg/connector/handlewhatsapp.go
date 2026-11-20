@@ -122,6 +122,8 @@ func (wa *WhatsAppClient) handleWAEvent(rawEvt any) (success bool) {
 		success = wa.handleWAArchive(evt)
 	case *events.Pin:
 		success = wa.handleWAPin(evt)
+	case *events.Star:
+		success = wa.handleWAStar(ctx, evt)
 
 	case *events.HistorySync:
 		wa.UserLogin.Log.Warn().Msg("Unexpected history sync event received")

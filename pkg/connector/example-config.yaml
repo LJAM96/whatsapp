@@ -54,7 +54,9 @@ url_previews: false
 # Should polls be sent using unstable MSC3381 event types?
 extev_polls: false
 # Should view-once messages be disabled entirely? When false, view-once media is
-# bridged with the Matrix view-limited marker and redacted after being opened once.
+# bridged with the view-limited marker (com.beeper view-limited media, one view),
+# so clients that support it can show it only once. The bridge itself does not
+# delete the media; other clients show it as normal media.
 disable_view_once: false
 # Should the bridge always send "active" delivery receipts (two gray ticks on WhatsApp)
 # even if the user isn't marked as online (e.g. when presence bridging isn't enabled)?

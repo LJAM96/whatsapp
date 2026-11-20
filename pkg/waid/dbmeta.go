@@ -49,7 +49,17 @@ type UserLoginMetadata struct {
 
 	Blocklist *types.Blocklist `json:"blocklist,omitempty"`
 
+	// Labels maps WhatsApp business label IDs to their last known metadata.
+	// The chats are tracked so renames and deletions can update the matching room tags.
+	Labels map[string]WALabel `json:"labels,omitempty"`
+
 	MData json.RawMessage `json:"mdata,omitempty"`
+}
+
+type WALabel struct {
+	Name  string      `json:"name"`
+	Color int32       `json:"color,omitempty"`
+	Chats []types.JID `json:"chats,omitempty"`
 }
 
 type PushKeys struct {

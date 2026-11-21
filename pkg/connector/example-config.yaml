@@ -33,7 +33,11 @@ send_presence_on_typing: false
 # This is disabled by default. Presence is only bridged if your own WhatsApp privacy
 # settings allow other users to see your last seen time, and only up to 100 contacts.
 bridge_contact_presence: false
-# Should WhatsApp status messages be bridged into a Matrix room?
+# Should contact status posts be bridged into a single per-login "WhatsApp Status" room?
+# Posts are bridged as normal messages, carry fi.mau.whatsapp.status metadata, and are
+# redacted 24 hours after they were posted. Posting your own status is not bridged.
+bridge_status: false
+# Upstream option kept for config compatibility. Superseded by bridge_status.
 enable_status_broadcast: true
 # Should sending WhatsApp status messages be allowed?
 # This can cause issues if the user has lots of contacts, so it's disabled by default.

@@ -162,7 +162,7 @@ func (wa *WhatsAppClient) applyHistoryInfo(info *bridgev2.ChatInfo, conv *wadb.C
 }
 
 const StatusBroadcastTopic = "WhatsApp status updates from your contacts"
-const StatusBroadcastName = "WhatsApp Status Broadcast"
+const StatusBroadcastName = "WhatsApp Status"
 const BroadcastTopic = "WhatsApp broadcast list"
 const UnnamedBroadcastName = "Unnamed broadcast list"
 const PrivateChatTopic = "WhatsApp private chat"

@@ -174,7 +174,7 @@ func (mc *MessageConverter) convertInteractiveMessage(ctx context.Context, info 
 	case *waE2E.InteractiveMessage_Header_LocationMessage:
 		content = fmt.Sprintf("Unsupported location message\n\n%s", content)
 	case *waE2E.InteractiveMessage_Header_ProductMessage:
-		content = fmt.Sprintf("Unsupported product message\n\n%s", content)
+		content = fmt.Sprintf("%s\n\n%s", formatProductMessageContent(headerMedia.ProductMessage), content)
 	case *waE2E.InteractiveMessage_Header_JPEGThumbnail:
 		content = fmt.Sprintf("Unsupported thumbnail message\n\n%s", content)
 	}
@@ -354,4 +354,133 @@ func (mc *MessageConverter) convertListResponseMessage(ctx context.Context, msg 
 			},
 		},
 	}, msg.GetContextInfo()
+}
+
+// formatProductPrice renders a WhatsApp priceAmount1000 value (thousandths of
+// the currency unit) as a human-readable string.
+func formatProductPrice(amount1000 int64, currencyCode string) string {
+	if amount1000 == 0 {
+		return ""
+	}
+	sign := ""
+	if amount1000 < 0 {
+		sign = "-"
+		amount1000 = -amount1000
+	}
+	major := amount1000 / 1000
+	minor := amount1000 % 1000
+	var amount string
+	if minor%10 == 0 {
+		amount = fmt.Sprintf("%d.%02d", major, minor/10)
+	} else {
+		amount = fmt.Sprintf("%d.%03d", major, minor)
+	}
+	if currencyCode == "" {
+		return sign + amount
+	}
+	return currencyCode + " " + sign + amount
+}
+
+// formatProductMessageContent builds the text of a product (or catalog card)
+// message. Keeping it separate from the media conversion makes the content
+// testable without a Matrix intent.
+func formatProductMessageContent(msg *waE2E.ProductMessage) string {
+	var lines []string
+	switch {
+	case msg.GetProduct() != nil:
+		product := msg.GetProduct()
+		if title := product.GetTitle(); title != "" {
+			lines = append(lines, fmt.Sprintf("Product: %s", title))
+		}
+		if price := formatProductPrice(product.GetPriceAmount1000(), product.GetCurrencyCode()); price != "" {
+			if salePrice := formatProductPrice(product.GetSalePriceAmount1000(), product.GetCurrencyCode()); salePrice != "" && salePrice != price {
+				lines = append(lines, fmt.Sprintf("Price: %s (was %s)", salePrice, price))
+			} else {
+				lines = append(lines, fmt.Sprintf("Price: %s", price))
+			}
+		}
+		if description := product.GetDescription(); description != "" {
+			lines = append(lines, description)
+		}
+		if link := product.GetURL(); link != "" {
+			lines = append(lines, fmt.Sprintf("[View product](%s)", link))
+		} else if link := product.GetSignedURL(); link != "" {
+			lines = append(lines, fmt.Sprintf("[View product](%s)", link))
+		}
+	case msg.GetCatalog() != nil:
+		catalog := msg.GetCatalog()
+		if title := catalog.GetTitle(); title != "" {
+			lines = append(lines, fmt.Sprintf("Catalog: %s", title))
+		}
+		if description := catalog.GetDescription(); description != "" {
+			lines = append(lines, description)
+		}
+	}
+	if body := msg.GetBody(); body != "" {
+		lines = append(lines, body)
+	}
+	if footer := msg.GetFooter(); footer != "" {
+		lines = append(lines, footer)
+	}
+	if len(lines) == 0 {
+		return "Product message"
+	}
+	return strings.Join(lines, "\n")
+}
+
+func productMessageExtra(msg *waE2E.ProductMessage) map[string]any {
+	extra := map[string]any{}
+	if product := msg.GetProduct(); product != nil {
+		meta := map[string]any{}
+		if v := product.GetProductID(); v != "" {
+			meta["product_id"] = v
+		}
+		if v := product.GetCurrencyCode(); v != "" {
+			meta["currency_code"] = v
+		}
+		if v := product.GetPriceAmount1000(); v != 0 {
+			meta["price_amount_1000"] = v
+		}
+		if v := product.GetSalePriceAmount1000(); v != 0 {
+			meta["sale_price_amount_1000"] = v
+		}
+		if v := product.GetURL(); v != "" {
+			meta["url"] = v
+		} else if v := product.GetSignedURL(); v != "" {
+			meta["url"] = v
+		}
+		if v := product.GetRetailerID(); v != "" {
+			meta["retailer_id"] = v
+		}
+		if len(meta) > 0 {
+			extra["fi.mau.whatsapp.product"] = meta
+		}
+	}
+	if jid := msg.GetBusinessOwnerJID(); jid != "" {
+		extra["fi.mau.whatsapp.business_owner_jid"] = jid
+	}
+	return extra
+}
+
+func (mc *MessageConverter) convertProductMessage(ctx context.Context, info *types.MessageInfo, msg *waE2E.ProductMessage) (*bridgev2.ConvertedMessagePart, *waE2E.ContextInfo) {
+	var image *waE2E.ImageMessage
+	switch {
+	case msg.GetProduct() != nil:
+		image = msg.GetProduct().GetProductImage()
+	case msg.GetCatalog() != nil:
+		image = msg.GetCatalog().GetCatalogImage()
+	}
+	var mediaPart *bridgev2.ConvertedMessagePart
+	if image != nil {
+		mediaPart, _ = mc.convertMediaMessage(ctx, image, "photo", info, false, nil, false)
+	}
+	converted := mc.postProcessBusinessMessage(formatProductMessageContent(msg), mediaPart)
+	if mediaPart == nil {
+		converted.Content.MsgType = event.MsgNotice
+	}
+	for k, v := range productMessageExtra(msg) {
+		converted.Extra[k] = v
+	}
+	converted.Extra["fi.mau.whatsapp.business_message_type"] = "product"
+	return converted, msg.GetContextInfo()
 }

@@ -250,11 +250,33 @@ func (wa *WhatsAppClient) getContactList(ctx context.Context, filter string, onl
 	return resp, nil
 }
 
-func (wa *WhatsAppClient) CreateGroup(ctx context.Context, params *bridgev2.GroupCreateParams) (*bridgev2.CreateChatResponse, error) {
-	req := whatsmeow.ReqCreateGroup{
-		Name:         ptr.Val(params.Name).Name,
-		Participants: make([]types.JID, len(params.Participants)),
+// groupCreateRequest converts the Matrix-side group creation parameters into a
+// whatsmeow group creation request. Participants are converted in CreateGroup
+// instead, because normalizing phone numbers to LIDs needs the device store.
+func groupCreateRequest(params *bridgev2.GroupCreateParams) (whatsmeow.ReqCreateGroup, error) {
+	req := whatsmeow.ReqCreateGroup{Name: ptr.Val(params.Name).Name}
+	if params.Parent != nil {
+		jid, err := waid.ParsePortalID(params.Parent.ID)
+		if err != nil {
+			return whatsmeow.ReqCreateGroup{}, fmt.Errorf("failed to parse parent ID: %w", err)
+		}
+		req.GroupLinkedParent.LinkedParentJID = jid
 	}
+	if params.Disappear != nil {
+		req.GroupEphemeral = types.GroupEphemeral{
+			IsEphemeral:       true,
+			DisappearingTimer: uint32(params.Disappear.Timer.Seconds()),
+		}
+	}
+	return req, nil
+}
+
+func (wa *WhatsAppClient) CreateGroup(ctx context.Context, params *bridgev2.GroupCreateParams) (*bridgev2.CreateChatResponse, error) {
+	req, err := groupCreateRequest(params)
+	if err != nil {
+		return nil, err
+	}
+	req.Participants = make([]types.JID, len(params.Participants))
 	for i, participant := range params.Participants {
 		jid := waid.ParseUserID(participant)
 		jid, err := wa.startChatPNToLID(ctx, jid)
@@ -262,19 +284,6 @@ func (wa *WhatsAppClient) CreateGroup(ctx context.Context, params *bridgev2.Grou
 			return nil, fmt.Errorf("failed to normalize participant %s: %w", participant, err)
 		}
 		req.Participants[i] = jid
-	}
-	if params.Parent != nil {
-		var err error
-		req.GroupLinkedParent.LinkedParentJID, err = waid.ParsePortalID(params.Parent.ID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse parent ID: %w", err)
-		}
-	}
-	if params.Disappear != nil {
-		req.GroupEphemeral = types.GroupEphemeral{
-			IsEphemeral:       true,
-			DisappearingTimer: uint32(params.Disappear.Timer.Seconds()),
-		}
 	}
 	var avatarBytes []byte
 	var avatarMXC id.ContentURIString

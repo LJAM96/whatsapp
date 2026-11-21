@@ -35,11 +35,14 @@ type Config struct {
 
 	DisplaynameTemplate string `yaml:"displayname_template"`
 
-	CallStartNotices            bool          `yaml:"call_start_notices"`
-	CallHistoryNotices          bool          `yaml:"call_history_notices"`
-	IdentityChangeNotices       bool          `yaml:"identity_change_notices"`
-	SendPresenceOnTyping        bool          `yaml:"send_presence_on_typing"`
-	BridgeContactPresence       bool          `yaml:"bridge_contact_presence"`
+	CallStartNotices      bool `yaml:"call_start_notices"`
+	CallHistoryNotices    bool `yaml:"call_history_notices"`
+	IdentityChangeNotices bool `yaml:"identity_change_notices"`
+	SendPresenceOnTyping  bool `yaml:"send_presence_on_typing"`
+	BridgeContactPresence bool `yaml:"bridge_contact_presence"`
+	BridgeStatus          bool `yaml:"bridge_status"`
+	// EnableStatusBroadcast is kept for config file compatibility with upstream.
+	// Status bridging is gated by BridgeStatus in this fork.
 	EnableStatusBroadcast       bool          `yaml:"enable_status_broadcast"`
 	DisableStatusBroadcastSend  bool          `yaml:"disable_status_broadcast_send"`
 	MuteStatusBroadcast         bool          `yaml:"mute_status_broadcast"`
@@ -121,6 +124,13 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Bool, "identity_change_notices")
 	helper.Copy(up.Bool, "send_presence_on_typing")
 	helper.Copy(up.Bool, "bridge_contact_presence")
+	helper.Copy(up.Bool, "bridge_status")
+	// Migrate configs that only had the upstream option to the new Weave switch.
+	if _, ok := helper.Get(up.Bool, "bridge_status"); !ok {
+		if old, ok := helper.Get(up.Bool, "enable_status_broadcast"); ok {
+			helper.Set(up.Bool, old, "bridge_status")
+		}
+	}
 	helper.Copy(up.Bool, "enable_status_broadcast")
 	helper.Copy(up.Bool, "disable_status_broadcast_send")
 	helper.Copy(up.Bool, "mute_status_broadcast")

@@ -408,6 +408,9 @@ func (wa *WhatsAppClient) HandleMatrixReadReceipt(ctx context.Context, receipt *
 	if err != nil {
 		return fmt.Errorf("failed to parse portal ID: %w", err)
 	}
+	if skipStatusReceipt(portalJID, receipt.Implicit) {
+		return nil
+	}
 	messages, err := receipt.Portal.Bridge.DB.Message.GetMessagesBetweenTimeQuery(ctx, receipt.Portal.PortalKey, receipt.LastRead, receipt.ReadUpTo)
 	if err != nil {
 		return fmt.Errorf("failed to get messages to mark as read: %w", err)

@@ -466,7 +466,7 @@ func (wa *WhatsAppClient) createPortalsFromHistorySync(ctx context.Context) {
 			return
 		}
 		conv := conversations[i]
-		if conv.ChatJID == types.StatusBroadcastJID && !wa.Main.Config.EnableStatusBroadcast {
+		if conv.ChatJID == types.StatusBroadcastJID && !wa.Main.Config.BridgeStatus {
 			wg.Done()
 			continue
 		} else if conv.ChatJID == types.PSAJID || conv.ChatJID == types.LegacyPSAJID {

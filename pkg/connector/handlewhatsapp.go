@@ -325,7 +325,7 @@ func (wa *WhatsAppClient) ensureAltJIDs(ctx context.Context, info *types.Message
 
 func (wa *WhatsAppClient) handleWAMessage(ctx context.Context, evt *events.Message) (success bool) {
 	success = true
-	if (evt.Info.Chat == types.StatusBroadcastJID && !wa.Main.Config.EnableStatusBroadcast) ||
+	if (evt.Info.Chat == types.StatusBroadcastJID && !wa.Main.Config.BridgeStatus) ||
 		(evt.Info.Chat.Server == types.NewsletterServer && wa.disableNewsletter) ||
 		(evt.Info.Chat.Server == types.BroadcastServer && evt.Info.IsFromMe) {
 		return
@@ -556,7 +556,7 @@ func (wa *WhatsAppClient) handleWAUndecryptableMessage(ctx context.Context, evt 
 	if evt.DecryptFailMode == events.DecryptFailHide {
 		return true
 	}
-	if evt.Info.Chat == types.StatusBroadcastJID && !wa.Main.Config.EnableStatusBroadcast {
+	if evt.Info.Chat == types.StatusBroadcastJID && !wa.Main.Config.BridgeStatus {
 		return true
 	}
 	res := wa.UserLogin.QueueRemoteEvent(&WAUndecryptableMessage{

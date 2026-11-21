@@ -241,6 +241,11 @@ func (mc *MessageConverter) ToMatrix(
 	}
 	dbMeta := part.DBMetadata.(*waid.MessageMetadata)
 	dbMeta.SenderDeviceID = info.Sender.Device
+	if info.Chat.Server == types.NewsletterServer {
+		// Reactions to channel posts are sent against the server ID rather than
+		// the message ID (whatsmeow.Client.NewsletterSendReaction).
+		dbMeta.NewsletterServerID = info.ServerID
+	}
 	if info.IsIncomingBroadcast() {
 		dbMeta.BroadcastListJID = &info.Chat
 		if part.Extra == nil {

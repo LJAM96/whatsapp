@@ -139,6 +139,33 @@ func fnSync(ce *commands.Event) {
 			})
 		}
 		ce.Reply("Queued syncs for %d groups", len(groups))
+	case "channel", "channels":
+		if wa.disableNewsletter {
+			ce.Reply("Channels aren't supported by this WhatsApp platform")
+			return
+		}
+		channels, err := wa.Client.GetSubscribedNewsletters(ce.Ctx)
+		if err != nil {
+			ce.Reply("Failed to get followed channels: %v", err)
+			return
+		}
+		for _, channel := range channels {
+			if channel == nil || channel.ID.IsEmpty() {
+				continue
+			}
+			wrapped := wa.wrapNewsletterInfo(ce.Ctx, channel)
+			wa.addExtrasToWrapped(ce.Ctx, channel.ID, wrapped, nil, true)
+			login.QueueRemoteEvent(&simplevent.ChatResync{
+				EventMeta: simplevent.EventMeta{
+					Type:         bridgev2.RemoteEventChatResync,
+					PortalKey:    wa.makeWAPortalKey(channel.ID),
+					LogContext:   logContext,
+					CreatePortal: true,
+				},
+				ChatInfo: wrapped,
+			})
+		}
+		ce.Reply("Queued syncs for %d channels", len(channels))
 	case "contacts":
 		wa.resyncContacts(false, false)
 		ce.React("✅")
@@ -314,7 +341,7 @@ var cmdJoin = &commands.FullHandler{
 	Name: "join",
 	Help: commands.HelpMeta{
 		Section:     HelpSectionInvites,
-		Description: "Join a group chat with an invite link.",
+		Description: "Join a group chat or follow a channel with an invite link.",
 		Args:        "<_invite link_>",
 	},
 	RequiresLogin: true,
@@ -356,6 +383,124 @@ func fnJoin(ce *commands.Event) {
 	} else {
 		ce.Reply("That doesn't look like a WhatsApp invite link")
 	}
+}
+
+// parseNewsletterTarget converts a follow/unfollow command argument into either
+// a channel JID or an invite link that whatsmeow can resolve.
+func parseNewsletterTarget(arg string) (jid types.JID, invite string, err error) {
+	if strings.HasPrefix(arg, whatsmeow.NewsletterLinkPrefix) {
+		return types.EmptyJID, arg, nil
+	}
+	jid, parseErr := types.ParseJID(arg)
+	if parseErr != nil || jid.Server != types.NewsletterServer || jid.User == "" {
+		return types.EmptyJID, "", fmt.Errorf("not a WhatsApp channel invite link or JID")
+	}
+	return jid.ToNonAD(), "", nil
+}
+
+func (wa *WhatsAppClient) resolveNewsletterTarget(ctx context.Context, arg string) (types.JID, error) {
+	jid, invite, err := parseNewsletterTarget(arg)
+	if err != nil {
+		return types.EmptyJID, err
+	} else if invite == "" {
+		return jid, nil
+	}
+	info, err := wa.Client.GetNewsletterInfoWithInvite(ctx, invite)
+	if err != nil {
+		return types.EmptyJID, fmt.Errorf("failed to get channel info: %w", err)
+	} else if info == nil || info.ID.IsEmpty() {
+		return types.EmptyJID, fmt.Errorf("channel invite doesn't point to a channel")
+	}
+	return info.ID, nil
+}
+
+var cmdFollowChannel = &commands.FullHandler{
+	Func: fnFollowChannel,
+	Name: "follow-channel",
+	Help: commands.HelpMeta{
+		Section:     HelpSectionInvites,
+		Description: "Follow a WhatsApp channel with an invite link or channel JID.",
+		Args:        "<_invite link or JID_>",
+	},
+	RequiresLogin: true,
+}
+
+func fnFollowChannel(ce *commands.Event) {
+	if len(ce.Args) == 0 {
+		ce.Reply("**Usage:** `$cmdprefix follow-channel <invite link or JID>`")
+		return
+	}
+	login := ce.User.GetDefaultLogin()
+	if login == nil {
+		ce.Reply("Login not found")
+		return
+	}
+	wa := login.Client.(*WhatsAppClient)
+	if wa.disableNewsletter {
+		ce.Reply("Channels aren't supported by this WhatsApp platform")
+		return
+	}
+	jid, err := wa.resolveNewsletterTarget(ce.Ctx, ce.Args[0])
+	if err != nil {
+		ce.Reply("%s", err)
+		return
+	}
+	err = wa.Client.FollowNewsletter(ce.Ctx, jid)
+	if err != nil {
+		ce.Log.Err(err).Stringer("channel_jid", jid).Msg("Failed to follow WhatsApp channel")
+		ce.Reply("Failed to follow channel: %v", err)
+		return
+	}
+	ce.Log.Debug().Stringer("channel_jid", jid).Msg("User successfully followed WhatsApp channel")
+	ce.Reply("Successfully followed channel `%s`, the portal should be created momentarily", jid)
+}
+
+var cmdUnfollowChannel = &commands.FullHandler{
+	Func: fnUnfollowChannel,
+	Name: "unfollow-channel",
+	Help: commands.HelpMeta{
+		Section:     HelpSectionInvites,
+		Description: "Unfollow a WhatsApp channel. Defaults to the current channel portal.",
+		Args:        "[_JID_]",
+	},
+	RequiresLogin: true,
+}
+
+func fnUnfollowChannel(ce *commands.Event) {
+	login := ce.User.GetDefaultLogin()
+	if login == nil {
+		ce.Reply("Login not found")
+		return
+	}
+	wa := login.Client.(*WhatsAppClient)
+	if wa.disableNewsletter {
+		ce.Reply("Channels aren't supported by this WhatsApp platform")
+		return
+	}
+	var jid types.JID
+	var err error
+	if len(ce.Args) > 0 {
+		jid, err = wa.resolveNewsletterTarget(ce.Ctx, ce.Args[0])
+	} else if ce.Portal != nil {
+		jid, err = waid.ParsePortalID(ce.Portal.ID)
+		if err == nil && jid.Server != types.NewsletterServer {
+			err = fmt.Errorf("this room isn't a channel portal")
+		}
+	} else {
+		ce.Reply("**Usage:** `$cmdprefix unfollow-channel <JID>` (or run it in a channel portal)")
+		return
+	}
+	if err != nil {
+		ce.Reply("%s", err)
+		return
+	}
+	if err = wa.Client.UnfollowNewsletter(ce.Ctx, jid); err != nil {
+		ce.Log.Err(err).Stringer("channel_jid", jid).Msg("Failed to unfollow WhatsApp channel")
+		ce.Reply("Failed to unfollow channel: %v", err)
+		return
+	}
+	ce.Log.Debug().Stringer("channel_jid", jid).Msg("User successfully unfollowed WhatsApp channel")
+	ce.Reply("Successfully unfollowed channel `%s`", jid)
 }
 
 var cmdStar = &commands.FullHandler{

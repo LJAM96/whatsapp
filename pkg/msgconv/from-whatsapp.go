@@ -331,6 +331,9 @@ func (mc *MessageConverter) ToMatrix(
 		}
 		cm.ThreadRoot = ptr.Ptr(waid.MakeMessageID(chat, pcp, commentTarget.GetID()))
 	}
+	if getEditTargetID(ctx) == "" {
+		mc.applyStatus(cm, waMsg, info, intent)
+	}
 	return cm
 }
 

@@ -98,6 +98,7 @@ func (wa *WhatsAppConnector) Init(bridge *bridgev2.Bridge) {
 	wa.MsgConv.AnimatedStickerConfig = wa.Config.AnimatedSticker
 	wa.MsgConv.ExtEvPolls = wa.Config.ExtEvPolls
 	wa.MsgConv.DisableViewOnce = wa.Config.DisableViewOnce
+	wa.MsgConv.BridgeStatus = wa.Config.BridgeStatus
 	wa.MsgConv.OldMediaSuffix = "Requesting old media is not enabled on this bridge."
 	wa.MsgConv.FetchURLPreviews = wa.Config.URLPreviews
 	if wa.Config.HistorySync.MediaRequests.AutoRequestMedia {

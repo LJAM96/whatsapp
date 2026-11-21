@@ -28,6 +28,7 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"maunium.net/go/mautrix/appservice"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
@@ -114,9 +115,31 @@ func (wa *WhatsAppClient) sendLiveLocationMessage(ctx context.Context, portal *b
 	return messageID, nil
 }
 
-// stopMatrixLiveLocation sends the final WhatsApp stop (if a message was
-// actually started) and removes the share from the database.
+// stopMatrixLiveLocation sends the final WhatsApp stop and removes the share.
+// It takes the per-portal lock so expiry cannot race an in-flight
+// read, send, or write in a Matrix event handler.
 func (wa *WhatsAppClient) stopMatrixLiveLocation(ctx context.Context, portal *bridgev2.Portal, mxid id.UserID, row *wadb.LiveLocationShare) error {
+	wa.liveLocationLock.Lock(portal.PortalKey)
+	defer wa.liveLocationLock.Unlock(portal.PortalKey)
+	return wa.stopMatrixLiveLocationLocked(ctx, portal, mxid, row)
+}
+
+// stopMatrixLiveLocationLocked is stopMatrixLiveLocation for callers that
+// already hold wa.liveLocationLock for portal.PortalKey. The row is re-read
+// from the database before sending: a stale expiry row may have been stopped
+// or replaced by a new share while this caller waited for the lock. Only a
+// row matching the one the caller observed is stopped and deleted, so a
+// concurrent update cannot be deleted or resurrected.
+func (wa *WhatsAppClient) stopMatrixLiveLocationLocked(ctx context.Context, portal *bridgev2.Portal, mxid id.UserID, row *wadb.LiveLocationShare) error {
+	current, err := wa.Main.DB.LiveLocation.GetAny(ctx, wa.UserLogin.ID, row.PortalKey, wadb.LiveLocationToWhatsApp, mxid)
+	if err != nil {
+		return err
+	}
+	if current == nil || current.InfoEventID != row.InfoEventID || current.Expiry != row.Expiry {
+		// Already stopped, or replaced by a new share.
+		return nil
+	}
+	row = current
 	// Nothing was sent to WhatsApp yet if the share never got a beacon, so
 	// there is no live location there to stop.
 	if row.WAMessageID != "" {
@@ -125,7 +148,50 @@ func (wa *WhatsAppClient) stopMatrixLiveLocation(ctx context.Context, portal *br
 			return err
 		}
 	}
-	return wa.Main.DB.LiveLocation.Delete(ctx, wa.UserLogin.ID, portal.PortalKey, wadb.LiveLocationToWhatsApp, mxid)
+	return wa.Main.DB.LiveLocation.Delete(ctx, wa.UserLogin.ID, row.PortalKey, wadb.LiveLocationToWhatsApp, mxid)
+}
+
+// liveLocationExpiryCheckInterval is how often pending Matrix-originated live
+// location deadlines are checked. A polling loop is used instead of a timer per
+// share so deadlines are restored from the database after a restart.
+const liveLocationExpiryCheckInterval = 5 * time.Second
+
+func (wa *WhatsAppClient) liveLocationExpiryLoop(ctx context.Context) {
+	ticker := time.NewTicker(liveLocationExpiryCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			wa.processExpiredLiveLocations(ctx)
+		}
+	}
+}
+
+// processExpiredLiveLocations sends the final stop for shares whose declared
+// beacon_info deadline has passed. It is the only place that handles expiry
+// without a subsequent Matrix event, and it reads from the database so pending
+// expirations survive restarts.
+func (wa *WhatsAppClient) processExpiredLiveLocations(ctx context.Context) {
+	if wa.Main == nil || wa.Main.DB == nil || wa.Main.DB.LiveLocation == nil || wa.UserLogin == nil {
+		return
+	}
+	rows, err := wa.Main.DB.LiveLocation.GetExpired(ctx, wa.UserLogin.ID, wadb.LiveLocationToWhatsApp, time.Now())
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to get expired live location shares")
+		return
+	}
+	for _, row := range rows {
+		if !row.Expired() {
+			continue
+		}
+		portal := &bridgev2.Portal{Portal: &database.Portal{PortalKey: row.PortalKey}}
+		if err := wa.stopMatrixLiveLocation(ctx, portal, row.MatrixUserID, row); err != nil {
+			zerolog.Ctx(ctx).Warn().Err(err).Stringer("user_id", row.MatrixUserID).
+				Msg("Failed to stop expired live location share")
+		}
+	}
 }
 
 // HandleMatrixBeaconInfo starts or stops a WhatsApp live location share when
@@ -147,13 +213,15 @@ func (wa *WhatsAppClient) HandleMatrixBeaconInfo(ctx context.Context, portal *br
 	if err != nil {
 		return err
 	}
+	wa.liveLocationLock.Lock(portal.PortalKey)
+	defer wa.liveLocationLock.Unlock(portal.PortalKey)
 	db := wa.Main.DB.LiveLocation
 	row, err := db.GetAny(ctx, wa.UserLogin.ID, portal.PortalKey, wadb.LiveLocationToWhatsApp, evt.Sender)
 	if err != nil {
 		return err
 	}
 	if row != nil && row.Expired() {
-		if err = wa.stopMatrixLiveLocation(ctx, portal, evt.Sender, row); err != nil {
+		if err = wa.stopMatrixLiveLocationLocked(ctx, portal, evt.Sender, row); err != nil {
 			return err
 		}
 		row = nil
@@ -162,7 +230,7 @@ func (wa *WhatsAppClient) HandleMatrixBeaconInfo(ctx context.Context, portal *br
 		if row == nil {
 			return nil
 		}
-		return wa.stopMatrixLiveLocation(ctx, portal, evt.Sender, row)
+		return wa.stopMatrixLiveLocationLocked(ctx, portal, evt.Sender, row)
 	}
 	if content.GetTimestamp() <= 0 || content.Timeout <= 0 {
 		return fmt.Errorf("invalid beacon_info: timestamp=%d timeout=%d", content.GetTimestamp(), content.Timeout)
@@ -195,7 +263,8 @@ func (wa *WhatsAppClient) HandleMatrixBeaconInfo(ctx context.Context, portal *br
 
 // HandleMatrixBeacon converts one of the user's own m.beacon messages into a
 // WhatsApp live location update. The first beacon starts the WhatsApp message
-// with sequence 1; later beacons increment the sequence and refresh expiry.
+// with sequence 1; later beacons only increment the sequence. The share's
+// expiry comes from beacon_info and is intentionally left untouched here.
 func (wa *WhatsAppClient) HandleMatrixBeacon(ctx context.Context, portal *bridgev2.Portal, evt *event.Event) (retErr error) {
 	if isBridgeDoublePuppetEcho(evt) {
 		zerolog.Ctx(ctx).Debug().Msg("Ignoring double-puppeted beacon echo")
@@ -209,13 +278,15 @@ func (wa *WhatsAppClient) HandleMatrixBeacon(ctx context.Context, portal *bridge
 	if err != nil {
 		return err
 	}
+	wa.liveLocationLock.Lock(portal.PortalKey)
+	defer wa.liveLocationLock.Unlock(portal.PortalKey)
 	db := wa.Main.DB.LiveLocation
 	row, err := db.GetAny(ctx, wa.UserLogin.ID, portal.PortalKey, wadb.LiveLocationToWhatsApp, evt.Sender)
 	if err != nil {
 		return err
 	}
 	if row != nil && row.Expired() {
-		if err = wa.stopMatrixLiveLocation(ctx, portal, evt.Sender, row); err != nil {
+		if err = wa.stopMatrixLiveLocationLocked(ctx, portal, evt.Sender, row); err != nil {
 			return err
 		}
 		row = nil
@@ -242,8 +313,7 @@ func (wa *WhatsAppClient) HandleMatrixBeacon(ctx context.Context, portal *bridge
 		row.WAMessageID = string(messageID)
 	}
 	row.Sequence = sequence
-	if ts := content.GetTimestamp(); ts > 0 && row.Timeout > 0 {
-		row.Expiry = ts + row.Timeout
-	}
+	// Expiry stays anchored to beacon_info: a delayed beacon must not extend
+	// the declared sharing window.
 	return db.Put(ctx, row)
 }

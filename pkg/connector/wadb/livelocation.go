@@ -68,6 +68,12 @@ const (
 		WHERE bridge_id=$1 AND user_login_id=$2 AND portal_id=$3 AND portal_receiver=$4
 		  AND direction=$5 AND matrix_user_id=$6
 	`
+	getExpiredLiveLocationsQuery = `
+		SELECT bridge_id, user_login_id, portal_id, portal_receiver, direction, matrix_user_id,
+		       info_event_id, description, timeout, started_ts, wa_message_id, sequence, expiry_ts
+		FROM whatsapp_live_location
+		WHERE bridge_id=$1 AND user_login_id=$2 AND direction=$3 AND expiry_ts > 0 AND expiry_ts <= $4
+	`
 	putLiveLocationSentMessageQuery = `
 		INSERT INTO whatsapp_live_location_sent_message (
 			bridge_id, user_login_id, portal_id, portal_receiver, matrix_user_id, wa_message_id
@@ -98,6 +104,13 @@ func (llq *LiveLocationQuery) Get(ctx context.Context, loginID networkid.UserLog
 		return nil, err
 	}
 	return share, nil
+}
+
+// GetExpired returns every share of the given direction belonging to a login
+// whose expiry has passed by the supplied time. It is used by deadline
+// processing, which reads from the database so pending stops survive restarts.
+func (llq *LiveLocationQuery) GetExpired(ctx context.Context, loginID networkid.UserLoginID, direction LiveLocationDirection, now time.Time) ([]*LiveLocationShare, error) {
+	return llq.QueryMany(ctx, getExpiredLiveLocationsQuery, llq.BridgeID, loginID, direction, now.UnixMilli())
 }
 
 func (llq *LiveLocationQuery) Put(ctx context.Context, share *LiveLocationShare) error {

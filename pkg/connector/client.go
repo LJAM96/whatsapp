@@ -137,6 +137,14 @@ type WhatsAppClient struct {
 	blocklistLock      sync.Mutex
 	starredLock        sync.Mutex
 	labelLock          sync.Mutex
+	outboundLabelLock  sync.Mutex
+
+	// liveLocationLock serializes the whole read/send/write sequence for an
+	// outgoing share of a portal. Both Matrix handlers and expiry processing
+	// hold it, so a stop cannot delete a row an in-flight update replaces (or
+	// race an update that would resurrect a stopped row). Keying by portal
+	// lets unrelated portals send concurrently.
+	liveLocationLock exsync.KeyedMutex[networkid.PortalKey]
 
 	callNoticeLock sync.Mutex
 	callNotices    map[string]*trackedCall
@@ -414,6 +422,7 @@ func (wa *WhatsAppClient) startLoops() {
 	ctx = wa.UserLogin.Log.WithContext(ctx)
 	go wa.historySyncLoop(ctx)
 	go wa.ghostResyncLoop(ctx)
+	go wa.liveLocationExpiryLoop(ctx)
 	if mrc := wa.Main.Config.HistorySync.MediaRequests; mrc.AutoRequestMedia && mrc.RequestMethod == MediaRequestMethodLocalTime {
 		go wa.mediaRequestLoop(ctx)
 	}

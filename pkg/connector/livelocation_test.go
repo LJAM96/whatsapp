@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -338,5 +339,341 @@ func TestHandleMatrixBeaconInfoDoublePuppetEcho(t *testing.T) {
 	}
 	if len(*sent) != 0 {
 		t.Errorf("double-puppeted beacon_info sent %d WhatsApp messages, want 0", len(*sent))
+	}
+}
+
+func TestHandleMatrixBeaconKeepsBeaconInfoDeadline(t *testing.T) {
+	const own = id.UserID("@own:example.org")
+	ctx := context.Background()
+	wa, portal, sent := newLiveLocationTestClient(t, own)
+	share, err := wa.Main.DB.LiveLocation.GetAny(ctx, wa.UserLogin.ID, portal.PortalKey, wadb.LiveLocationToWhatsApp, own)
+	if err != nil || share == nil {
+		t.Fatalf("failed to get seeded share: %v (share=%+v)", err, share)
+	}
+	expiry := time.Now().Add(10 * time.Minute).UnixMilli()
+	share.Expiry = expiry
+	if err := wa.Main.DB.LiveLocation.Put(ctx, share); err != nil {
+		t.Fatal(err)
+	}
+	evt := liveLocationBeaconEvent(own, false)
+	evt.Content.Parsed.(*event.BeaconEventContent).Timestamp = time.Now().Add(14 * time.Minute).UnixMilli()
+	if err := wa.HandleMatrixBeacon(ctx, portal, evt); err != nil {
+		t.Fatalf("HandleMatrixBeacon() error: %v", err)
+	}
+	if len(*sent) != 1 {
+		t.Fatalf("sent %d WhatsApp messages, want 1", len(*sent))
+	}
+	updated, err := wa.Main.DB.LiveLocation.GetAny(ctx, wa.UserLogin.ID, portal.PortalKey, wadb.LiveLocationToWhatsApp, own)
+	if err != nil || updated == nil {
+		t.Fatalf("failed to get updated share: %v (share=%+v)", err, updated)
+	}
+	if updated.Expiry != expiry {
+		t.Errorf("expiry = %d, want %d (beacon must not extend beacon_info deadline)", updated.Expiry, expiry)
+	}
+	if updated.Sequence != share.Sequence+1 {
+		t.Errorf("sequence = %d, want %d", updated.Sequence, share.Sequence+1)
+	}
+}
+
+func captureLiveLocationMessages(wa *WhatsAppClient, sent *[]*waE2E.Message) {
+	wa.sendLiveLocationHook = func(_ context.Context, _ *bridgev2.Portal, msg *waE2E.Message) (types.MessageID, error) {
+		*sent = append(*sent, msg)
+		return types.MessageID("stop-message-id"), nil
+	}
+}
+
+func liveLocationTestShare(t *testing.T, wa *WhatsAppClient, portal *bridgev2.Portal, mxid id.UserID) *wadb.LiveLocationShare {
+	t.Helper()
+	share, err := wa.Main.DB.LiveLocation.GetAny(context.Background(), wa.UserLogin.ID, portal.PortalKey, wadb.LiveLocationToWhatsApp, mxid)
+	if err != nil || share == nil {
+		t.Fatalf("failed to get seeded share: %v (share=%+v)", err, share)
+	}
+	return share
+}
+
+func TestProcessExpiredLiveLocationsStopsExpiredShare(t *testing.T) {
+	const own = id.UserID("@own:example.org")
+	ctx := context.Background()
+	wa, portal, _ := newLiveLocationTestClient(t, own)
+	share := liveLocationTestShare(t, wa, portal, own)
+	share.Expiry = time.Now().Add(-time.Minute).UnixMilli()
+	if err := wa.Main.DB.LiveLocation.Put(ctx, share); err != nil {
+		t.Fatal(err)
+	}
+	var sent []*waE2E.Message
+	captureLiveLocationMessages(wa, &sent)
+
+	wa.processExpiredLiveLocations(ctx)
+
+	if len(sent) != 1 {
+		t.Fatalf("sent %d WhatsApp messages, want 1", len(sent))
+	}
+	stop := sent[0].GetLiveLocationMessage()
+	if stop == nil || stop.GetDegreesLatitude() != 0 || stop.GetDegreesLongitude() != 0 {
+		t.Errorf("message is not a live location stop: %+v", sent[0])
+	}
+	if got := stop.GetSequenceNumber(); got != share.Sequence+1 {
+		t.Errorf("stop sequence = %d, want %d", got, share.Sequence+1)
+	}
+	remaining, err := wa.Main.DB.LiveLocation.GetAny(ctx, wa.UserLogin.ID, portal.PortalKey, wadb.LiveLocationToWhatsApp, own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining != nil {
+		t.Errorf("expired share was not deleted: %+v", remaining)
+	}
+}
+
+func TestProcessExpiredLiveLocationsLeavesLiveShares(t *testing.T) {
+	const own = id.UserID("@own:example.org")
+	ctx := context.Background()
+	wa, portal, _ := newLiveLocationTestClient(t, own)
+	var sent []*waE2E.Message
+	captureLiveLocationMessages(wa, &sent)
+
+	wa.processExpiredLiveLocations(ctx)
+
+	if len(sent) != 0 {
+		t.Errorf("sent %d WhatsApp messages for a live share, want 0", len(sent))
+	}
+	if share := liveLocationTestShare(t, wa, portal, own); share == nil {
+		t.Error("live share was deleted")
+	}
+}
+
+func TestProcessExpiredLiveLocationsIgnoresOtherDirections(t *testing.T) {
+	const own = id.UserID("@own:example.org")
+	ctx := context.Background()
+	wa, portal, _ := newLiveLocationTestClient(t, own)
+	ghost := id.UserID("@ghost:example.org")
+	err := wa.Main.DB.LiveLocation.Put(ctx, &wadb.LiveLocationShare{
+		UserLoginID:  wa.UserLogin.ID,
+		PortalKey:    portal.PortalKey,
+		Direction:    wadb.LiveLocationFromWhatsApp,
+		MatrixUserID: ghost,
+		InfoEventID:  "$info",
+		WAMessageID:  "original-message-id",
+		Sequence:     1,
+		Expiry:       time.Now().Add(-time.Minute).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent []*waE2E.Message
+	captureLiveLocationMessages(wa, &sent)
+
+	wa.processExpiredLiveLocations(ctx)
+
+	if len(sent) != 0 {
+		t.Errorf("sent %d WhatsApp messages for a WhatsApp-originated share, want 0", len(sent))
+	}
+	row, err := wa.Main.DB.LiveLocation.GetAny(ctx, wa.UserLogin.ID, portal.PortalKey, wadb.LiveLocationFromWhatsApp, ghost)
+	if err != nil || row == nil {
+		t.Errorf("WhatsApp-originated share was modified: %v (row=%+v)", err, row)
+	}
+}
+
+func TestProcessExpiredLiveLocationsDeletesShareWithoutStart(t *testing.T) {
+	const own = id.UserID("@own:example.org")
+	ctx := context.Background()
+	wa, portal, _ := newLiveLocationTestClient(t, own)
+	share := liveLocationTestShare(t, wa, portal, own)
+	share.WAMessageID = ""
+	share.Expiry = time.Now().Add(-time.Minute).UnixMilli()
+	if err := wa.Main.DB.LiveLocation.Put(ctx, share); err != nil {
+		t.Fatal(err)
+	}
+	var sent []*waE2E.Message
+	captureLiveLocationMessages(wa, &sent)
+
+	wa.processExpiredLiveLocations(ctx)
+
+	if len(sent) != 0 {
+		t.Errorf("sent %d WhatsApp messages for a share that never started, want 0", len(sent))
+	}
+	remaining, err := wa.Main.DB.LiveLocation.GetAny(ctx, wa.UserLogin.ID, portal.PortalKey, wadb.LiveLocationToWhatsApp, own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining != nil {
+		t.Errorf("expired share was not deleted: %+v", remaining)
+	}
+}
+
+func TestStopMatrixLiveLocationIsIdempotent(t *testing.T) {
+	const own = id.UserID("@own:example.org")
+	ctx := context.Background()
+	wa, portal, _ := newLiveLocationTestClient(t, own)
+	share := liveLocationTestShare(t, wa, portal, own)
+	var sent []*waE2E.Message
+	captureLiveLocationMessages(wa, &sent)
+
+	if err := wa.stopMatrixLiveLocation(ctx, portal, own, share); err != nil {
+		t.Fatalf("first stop error: %v", err)
+	}
+	if err := wa.stopMatrixLiveLocation(ctx, portal, own, share); err != nil {
+		t.Fatalf("second stop error: %v", err)
+	}
+	if len(sent) != 1 {
+		t.Errorf("sent %d WhatsApp stop messages, want 1", len(sent))
+	}
+}
+
+func TestStopMatrixLiveLocationLockedSkipsReplacedRow(t *testing.T) {
+	const own = id.UserID("@own:example.org")
+	ctx := context.Background()
+	wa, portal, _ := newLiveLocationTestClient(t, own)
+	share := liveLocationTestShare(t, wa, portal, own)
+	stale := *share
+	stale.Expiry-- // a stale expiry-loop row that no longer matches the DB
+	var sent []*waE2E.Message
+	captureLiveLocationMessages(wa, &sent)
+
+	wa.liveLocationLock.Lock(portal.PortalKey)
+	err := wa.stopMatrixLiveLocationLocked(ctx, portal, own, &stale)
+	wa.liveLocationLock.Unlock(portal.PortalKey)
+	if err != nil {
+		t.Fatalf("stopMatrixLiveLocationLocked() error: %v", err)
+	}
+	if len(sent) != 0 {
+		t.Errorf("sent %d stops for a replaced row, want 0", len(sent))
+	}
+	if got := liveLocationTestShare(t, wa, portal, own); got == nil {
+		t.Error("replaced row was deleted")
+	}
+}
+
+func TestExpiryStopWaitsForInFlightBeacon(t *testing.T) {
+	const own = id.UserID("@own:example.org")
+	ctx := context.Background()
+	wa, portal, _ := newLiveLocationTestClient(t, own)
+	share := liveLocationTestShare(t, wa, portal, own)
+
+	beaconSendStarted := make(chan struct{})
+	releaseBeacon := make(chan struct{})
+	var mu sync.Mutex
+	var sent []*waE2E.Message
+	wa.sendLiveLocationHook = func(_ context.Context, _ *bridgev2.Portal, msg *waE2E.Message) (types.MessageID, error) {
+		mu.Lock()
+		sent = append(sent, msg)
+		call := len(sent)
+		mu.Unlock()
+		if call == 1 {
+			close(beaconSendStarted)
+			<-releaseBeacon
+		}
+		return types.MessageID("sent-message-id"), nil
+	}
+
+	beaconDone := make(chan error, 1)
+	go func() {
+		beaconDone <- wa.HandleMatrixBeacon(ctx, portal, liveLocationBeaconEvent(own, false))
+	}()
+	<-beaconSendStarted
+
+	// The declared deadline passes while the beacon update is in flight.
+	expired := *share
+	expired.Expiry = time.Now().Add(-time.Minute).UnixMilli()
+	if err := wa.Main.DB.LiveLocation.Put(ctx, &expired); err != nil {
+		t.Fatal(err)
+	}
+	expiryDone := make(chan struct{})
+	go func() {
+		wa.processExpiredLiveLocations(ctx)
+		close(expiryDone)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	inFlight := len(sent)
+	mu.Unlock()
+	if inFlight != 1 {
+		t.Errorf("expiry sent a stop while a beacon update was in flight: %d messages", inFlight)
+	}
+
+	close(releaseBeacon)
+	if err := <-beaconDone; err != nil {
+		t.Fatalf("HandleMatrixBeacon() error: %v", err)
+	}
+	<-expiryDone
+
+	mu.Lock()
+	sentCopy := append([]*waE2E.Message(nil), sent...)
+	mu.Unlock()
+	if len(sentCopy) != 1 {
+		t.Fatalf("sent %d messages, want 1 (the beacon update, no stop for the replaced share)", len(sentCopy))
+	}
+	updated := liveLocationTestShare(t, wa, portal, own)
+	if updated.Sequence != share.Sequence+1 {
+		t.Errorf("sequence = %d, want %d", updated.Sequence, share.Sequence+1)
+	}
+	if updated.Expiry != share.Expiry {
+		t.Errorf("expiry = %d, want %d (beacon must not extend the deadline)", updated.Expiry, share.Expiry)
+	}
+}
+
+func TestBeaconWaitsForInFlightExpiryStop(t *testing.T) {
+	const own = id.UserID("@own:example.org")
+	ctx := context.Background()
+	wa, portal, _ := newLiveLocationTestClient(t, own)
+	share := liveLocationTestShare(t, wa, portal, own)
+	share.Expiry = time.Now().Add(-time.Minute).UnixMilli()
+	if err := wa.Main.DB.LiveLocation.Put(ctx, share); err != nil {
+		t.Fatal(err)
+	}
+
+	stopSendStarted := make(chan struct{})
+	releaseStop := make(chan struct{})
+	var mu sync.Mutex
+	var sent []*waE2E.Message
+	wa.sendLiveLocationHook = func(_ context.Context, _ *bridgev2.Portal, msg *waE2E.Message) (types.MessageID, error) {
+		mu.Lock()
+		sent = append(sent, msg)
+		call := len(sent)
+		mu.Unlock()
+		if call == 1 {
+			close(stopSendStarted)
+			<-releaseStop
+		}
+		return types.MessageID("stop-message-id"), nil
+	}
+
+	expiryDone := make(chan struct{})
+	go func() {
+		wa.processExpiredLiveLocations(ctx)
+		close(expiryDone)
+	}()
+	<-stopSendStarted
+
+	beaconDone := make(chan error, 1)
+	go func() {
+		beaconDone <- wa.HandleMatrixBeacon(ctx, portal, liveLocationBeaconEvent(own, false))
+	}()
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	inFlight := len(sent)
+	mu.Unlock()
+	if inFlight != 1 {
+		t.Errorf("beacon sent %d messages while an expiry stop was in flight, want 0 extra", inFlight-1)
+	}
+
+	close(releaseStop)
+	<-expiryDone
+	if err := <-beaconDone; err != nil {
+		t.Fatalf("HandleMatrixBeacon() error: %v", err)
+	}
+
+	mu.Lock()
+	total := len(sent)
+	mu.Unlock()
+	if total != 1 {
+		t.Errorf("sent %d messages, want 1 (the final stop)", total)
+	}
+	remaining, err := wa.Main.DB.LiveLocation.GetAny(ctx, wa.UserLogin.ID, portal.PortalKey, wadb.LiveLocationToWhatsApp, own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining != nil {
+		t.Errorf("stopped share was resurrected: %+v", remaining)
 	}
 }

@@ -43,12 +43,19 @@ type presenceCall struct {
 type fakePresenceSender struct {
 	lock  sync.Mutex
 	calls []presenceCall
+	// hook, when set, runs after a call is recorded. Tests use it to hold a
+	// presence send in flight so concurrent ordering can be observed.
+	hook func(state types.ChatPresence)
 }
 
 func (s *fakePresenceSender) SendChatPresence(_ context.Context, jid types.JID, state types.ChatPresence, media types.ChatPresenceMedia) error {
 	s.lock.Lock()
-	defer s.lock.Unlock()
 	s.calls = append(s.calls, presenceCall{jid: jid, state: state, media: media})
+	hook := s.hook
+	s.lock.Unlock()
+	if hook != nil {
+		hook(state)
+	}
 	return nil
 }
 
@@ -365,5 +372,190 @@ func TestHandleRecording(t *testing.T) {
 				t.Errorf("presence calls = %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+// The expiry callback must not release the recording lock before its paused
+// send completes. Otherwise a newer set can send composing and install a fresh
+// timer in the gap, and the stale paused send then clears that new state.
+func TestRecordingExpireSerializesWithRefresh(t *testing.T) {
+	ctx := context.Background()
+	chat := types.NewJID("15551234567", types.DefaultUserServer)
+	key := networkid.PortalKey{ID: waid.MakePortalID(chat)}
+	composing := presenceCall{jid: chat, state: types.ChatPresenceComposing, media: types.ChatPresenceMediaAudio}
+	paused := presenceCall{jid: chat, state: types.ChatPresencePaused}
+
+	pausedSendStarted := make(chan struct{})
+	releasePaused := make(chan struct{})
+	var once sync.Once
+	sender := &fakePresenceSender{
+		hook: func(state types.ChatPresence) {
+			if state != types.ChatPresencePaused {
+				return
+			}
+			once.Do(func() { close(pausedSendStarted) })
+			<-releasePaused
+		},
+	}
+	clock := &fakeRecordingClock{now: time.Unix(0, 0)}
+	rp := newRecordingPresence(sender, clock)
+	if err := rp.set(ctx, key, chat, true); err != nil {
+		t.Fatalf("initial set(true) error: %v", err)
+	}
+
+	expireDone := make(chan struct{})
+	go func() {
+		clock.advance(recordingPresenceTimeout)
+		close(expireDone)
+	}()
+	<-pausedSendStarted
+
+	// The expiring callback has removed the old timer and is mid-send. A
+	// refresh must wait for that send instead of overtaking it.
+	refreshDone := make(chan error, 1)
+	go func() {
+		refreshDone <- rp.set(ctx, key, chat, true)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if got := sender.snapshot(); len(got) != 2 {
+		t.Errorf("presence calls while expiry send is in flight = %+v, want the initial composing and the expiring paused only", got)
+	}
+
+	close(releasePaused)
+	<-expireDone
+	if err := <-refreshDone; err != nil {
+		t.Fatalf("refresh set(true) error: %v", err)
+	}
+	want := []presenceCall{composing, paused, composing}
+	if got := sender.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("presence calls = %+v, want %+v", got, want)
+	}
+
+	// The refreshed recording owns a fresh 30 s window.
+	clock.advance(recordingPresenceTimeout)
+	wantAfter := append(append([]presenceCall(nil), want...), paused)
+	if got := sender.snapshot(); !reflect.DeepEqual(got, wantAfter) {
+		t.Errorf("presence calls after refreshed timeout = %+v, want %+v", got, wantAfter)
+	}
+}
+
+// An explicit stop goes through the same set path as a refresh, so it must be
+// serialized with an in-flight expiry for the same reason.
+func TestRecordingExpireSerializesWithExplicitStop(t *testing.T) {
+	ctx := context.Background()
+	chat := types.NewJID("15551234567", types.DefaultUserServer)
+	key := networkid.PortalKey{ID: waid.MakePortalID(chat)}
+	composing := presenceCall{jid: chat, state: types.ChatPresenceComposing, media: types.ChatPresenceMediaAudio}
+	paused := presenceCall{jid: chat, state: types.ChatPresencePaused}
+
+	pausedSendStarted := make(chan struct{})
+	releasePaused := make(chan struct{})
+	var once sync.Once
+	sender := &fakePresenceSender{
+		hook: func(state types.ChatPresence) {
+			if state != types.ChatPresencePaused {
+				return
+			}
+			once.Do(func() { close(pausedSendStarted) })
+			<-releasePaused
+		},
+	}
+	clock := &fakeRecordingClock{now: time.Unix(0, 0)}
+	rp := newRecordingPresence(sender, clock)
+	if err := rp.set(ctx, key, chat, true); err != nil {
+		t.Fatalf("initial set(true) error: %v", err)
+	}
+
+	expireDone := make(chan struct{})
+	go func() {
+		clock.advance(recordingPresenceTimeout)
+		close(expireDone)
+	}()
+	<-pausedSendStarted
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- rp.set(ctx, key, chat, false)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if got := sender.snapshot(); len(got) != 2 {
+		t.Errorf("presence calls while expiry send is in flight = %+v, want the initial composing and the expiring paused only", got)
+	}
+
+	close(releasePaused)
+	<-expireDone
+	if err := <-stopDone; err != nil {
+		t.Fatalf("explicit stop set(false) error: %v", err)
+	}
+	want := []presenceCall{composing, paused, paused}
+	if got := sender.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("presence calls = %+v, want %+v", got, want)
+	}
+
+	// The stop cancelled the timer: no further paused send should appear.
+	clock.advance(2 * recordingPresenceTimeout)
+	if got := sender.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("presence calls after cancelled timeout = %+v, want %+v", got, want)
+	}
+}
+
+// The reverse ordering is already covered by set holding the lock while it
+// sends composing: an expiry for the replaced timer cannot send paused while a
+// refresh is still in flight, nor after the refresh installed its new timer.
+func TestRecordingRefreshSerializesWithExpire(t *testing.T) {
+	ctx := context.Background()
+	chat := types.NewJID("15551234567", types.DefaultUserServer)
+	key := networkid.PortalKey{ID: waid.MakePortalID(chat)}
+	composing := presenceCall{jid: chat, state: types.ChatPresenceComposing, media: types.ChatPresenceMediaAudio}
+
+	armBlock := make(chan struct{})
+	composingSendStarted := make(chan struct{})
+	releaseComposing := make(chan struct{})
+	sender := &fakePresenceSender{
+		hook: func(state types.ChatPresence) {
+			if state != types.ChatPresenceComposing {
+				return
+			}
+			select {
+			case <-armBlock:
+				close(composingSendStarted)
+				<-releaseComposing
+			default:
+			}
+		},
+	}
+	clock := &fakeRecordingClock{now: time.Unix(0, 0)}
+	rp := newRecordingPresence(sender, clock)
+	if err := rp.set(ctx, key, chat, true); err != nil {
+		t.Fatalf("initial set(true) error: %v", err)
+	}
+	oldTimer := clock.timers[0]
+	close(armBlock)
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		refreshDone <- rp.set(ctx, key, chat, true)
+	}()
+	<-composingSendStarted
+
+	// The old timer was replaced, even though the refresh is still mid-send.
+	expireDone := make(chan struct{})
+	go func() {
+		rp.expire(ctx, key, chat, oldTimer)
+		close(expireDone)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if got := sender.snapshot(); len(got) != 2 {
+		t.Errorf("presence calls while refresh send is in flight = %+v, want the two composing updates and no paused", got)
+	}
+
+	close(releaseComposing)
+	if err := <-refreshDone; err != nil {
+		t.Fatalf("refresh set(true) error: %v", err)
+	}
+	<-expireDone
+	want := []presenceCall{composing, composing}
+	if got := sender.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("presence calls = %+v, want %+v", got, want)
 	}
 }

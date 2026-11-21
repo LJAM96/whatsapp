@@ -146,17 +146,17 @@ func (rp *recordingPresence) set(ctx context.Context, key networkid.PortalKey, j
 
 // expire sends paused when a timer fires. It checks that the timer is still the
 // active one for the portal so a callback racing a newer event can't cancel the
-// newer state.
+// newer state. The lock is held across the presence send, just like set: an
+// expired callback that validated and removed its timer must not release the
+// lock before a newer set can send composing and install a fresh timer, or the
+// paused send below would clear the newly refreshed recording state.
 func (rp *recordingPresence) expire(ctx context.Context, key networkid.PortalKey, jid types.JID, timer afterFuncTimer) {
 	rp.lock.Lock()
-	active := rp.timers[key] == timer
-	if active {
-		delete(rp.timers, key)
-	}
-	rp.lock.Unlock()
-	if !active {
+	defer rp.lock.Unlock()
+	if rp.timers[key] != timer {
 		return
 	}
+	delete(rp.timers, key)
 	if err := rp.sender.SendChatPresence(ctx, jid, types.ChatPresencePaused, ""); err != nil {
 		zerolog.Ctx(ctx).Warn().Err(err).Stringer("chat", jid).
 			Msg("Failed to expire recording presence")

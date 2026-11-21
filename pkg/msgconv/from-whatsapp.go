@@ -170,6 +170,8 @@ func (mc *MessageConverter) ToMatrix(
 		part, contextInfo = mc.convertListMessage(ctx, waMsg.ListMessage)
 	case waMsg.ListResponseMessage != nil:
 		part, contextInfo = mc.convertListResponseMessage(ctx, waMsg.ListResponseMessage)
+	case waMsg.ProductMessage != nil:
+		part, contextInfo = mc.convertProductMessage(ctx, info, waMsg.ProductMessage)
 	case waMsg.PollCreationMessage != nil:
 		part, contextInfo = mc.convertPollCreationMessage(ctx, waMsg.PollCreationMessage)
 	case waMsg.PollCreationMessageV2 != nil:

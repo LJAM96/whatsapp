@@ -110,7 +110,8 @@ func (wa *WhatsAppConnector) Init(bridge *bridgev2.Bridge) {
 	wa.DB = wadb.New(bridge.ID, bridge.DB.Database, bridge.Log.With().Str("db_section", "whatsapp").Logger())
 	wa.MsgConv.DB = wa.DB
 	wa.Bridge.Commands.(*commands.Processor).AddHandlers(
-		cmdAccept, cmdSync, cmdResetAppState, cmdInviteLink, cmdResolveLink, cmdJoin, cmdStar, cmdUnstar,
+		cmdAccept, cmdSync, cmdResetAppState, cmdInviteLink, cmdResolveLink, cmdJoin,
+		cmdFollowChannel, cmdUnfollowChannel, cmdStar, cmdUnstar,
 	)
 	wa.mediaEditCache = make(MediaEditCache)
 	wa.unmigratedDMs = exsync.NewSet[networkid.PortalKey]()

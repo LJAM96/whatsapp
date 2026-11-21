@@ -103,15 +103,15 @@ type GroupInviteMeta struct {
 }
 
 type MessageMetadata struct {
-	SenderDeviceID    uint16               `json:"sender_device_id,omitzero"`
-	Error             MessageErrorType     `json:"error,omitempty"`
-	BroadcastListJID  *types.JID           `json:"broadcast_list_jid,omitempty"`
-	GroupInvite       *GroupInviteMeta     `json:"group_invite,omitempty"`
-	FailedMediaMeta   json.RawMessage      `json:"media_meta,omitempty"`
-	DirectMediaMeta   json.RawMessage      `json:"direct_media_meta,omitempty"`
-	IsMatrixPoll      bool                 `json:"is_matrix_poll,omitzero"`
-	IsEvent           bool                 `json:"is_event,omitzero"`
-	Edits             []types.MessageID    `json:"edits,omitempty"`
+	SenderDeviceID     uint16                `json:"sender_device_id,omitzero"`
+	Error              MessageErrorType      `json:"error,omitempty"`
+	BroadcastListJID   *types.JID            `json:"broadcast_list_jid,omitempty"`
+	GroupInvite        *GroupInviteMeta      `json:"group_invite,omitempty"`
+	FailedMediaMeta    json.RawMessage       `json:"media_meta,omitempty"`
+	DirectMediaMeta    json.RawMessage       `json:"direct_media_meta,omitempty"`
+	IsMatrixPoll       bool                  `json:"is_matrix_poll,omitzero"`
+	IsEvent            bool                  `json:"is_event,omitzero"`
+	Edits              []types.MessageID     `json:"edits,omitempty"`
 	NewsletterServerID types.MessageServerID `json:"newsletter_server_id,omitzero"`
 }
 
@@ -137,8 +137,9 @@ func (mm *MessageMetadata) CopyFrom(other any) {
 }
 
 type ReactionMetadata struct {
-	SenderDeviceID  uint16 `json:"sender_device_id,omitempty"`
-	IsEventResponse bool   `json:"is_event_response,omitzero"`
+	SenderDeviceID     uint16                `json:"sender_device_id,omitempty"`
+	IsEventResponse    bool                  `json:"is_event_response,omitzero"`
+	NewsletterServerID types.MessageServerID `json:"newsletter_server_id,omitzero"`
 }
 
 type PortalMetadata struct {

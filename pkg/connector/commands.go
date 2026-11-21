@@ -239,13 +239,24 @@ func fnResetAppState(ce *commands.Event) {
 	ce.Reply("Sent app state reset request. Your phone should log out all linked devices shortly, after which you can log in again.")
 }
 
+// inviteLinkResetRequested reports whether the invite-link command arguments
+// ask for the link to be regenerated. Both the documented `--reset` flag and a
+// plain `reset` argument are accepted.
+func inviteLinkResetRequested(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	arg := strings.ToLower(args[0])
+	return arg == "--reset" || arg == "reset"
+}
+
 var cmdInviteLink = &commands.FullHandler{
 	Func: fnInviteLink,
 	Name: "invite-link",
 	Help: commands.HelpMeta{
 		Section:     HelpSectionInvites,
 		Description: "Get an invite link to the current group chat, optionally regenerating the link and revoking the old link.",
-		Args:        "[--reset]",
+		Args:        "[--reset|reset]",
 	},
 	RequiresPortal: true,
 	RequiresLogin:  true,
@@ -264,7 +275,7 @@ func fnInviteLink(ce *commands.Event) {
 	}
 
 	wa := login.Client.(*WhatsAppClient)
-	reset := len(ce.Args) > 0 && strings.ToLower(ce.Args[0]) == "--reset"
+	reset := inviteLinkResetRequested(ce.Args)
 	if portalJID.Server == types.DefaultUserServer || portalJID.Server == types.HiddenUserServer {
 		ce.Reply("Can't get invite link to private chat")
 	} else if portalJID.IsBroadcastList() {

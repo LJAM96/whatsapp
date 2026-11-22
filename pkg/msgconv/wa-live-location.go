@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -72,6 +73,37 @@ func liveLocationGeoURI(lat, long float64, accuracy uint32) string {
 	return uri
 }
 
+// parseBeaconUncertainty parses an RFC 5870 uncertainty radius (uval) and
+// rounds it to the integer meter accuracy used by WhatsApp. The uval grammar
+// is a nonnegative decimal: 1*DIGIT ["." 1*DIGIT], so signs, exponents,
+// empty values and malformed decimals are rejected rather than forwarded.
+func parseBeaconUncertainty(value string) (uint32, error) {
+	isDigits := func(s string) bool {
+		if s == "" {
+			return false
+		}
+		for _, r := range s {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	whole, frac, hasDot := strings.Cut(value, ".")
+	if !isDigits(whole) || (hasDot && !isDigits(frac)) {
+		return 0, fmt.Errorf("location accuracy is not a number: %q", value)
+	}
+	parsed, parseErr := strconv.ParseFloat(value, 64)
+	if parseErr != nil {
+		return 0, fmt.Errorf("location accuracy is not a number: %w", parseErr)
+	}
+	rounded := math.Round(parsed)
+	if rounded > math.MaxUint32 {
+		return 0, fmt.Errorf("location accuracy is too large: %q", value)
+	}
+	return uint32(rounded), nil
+}
+
 // parseBeaconGeoURI parses an MSC3488 geo URI into coordinates and the
 // optional uncertainty radius, which maps to WhatsApp's accuracy in meters.
 func parseBeaconGeoURI(uri string) (lat, long float64, accuracy uint32, err error) {
@@ -84,12 +116,10 @@ func parseBeaconGeoURI(uri string) (lat, long float64, accuracy uint32, err erro
 		if !ok || key != "u" {
 			continue
 		}
-		parsed, parseErr := strconv.ParseUint(value, 10, 32)
-		if parseErr != nil {
-			err = fmt.Errorf("location accuracy is not a number: %w", parseErr)
+		accuracy, err = parseBeaconUncertainty(value)
+		if err != nil {
 			return
 		}
-		accuracy = uint32(parsed)
 	}
 	return
 }

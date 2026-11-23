@@ -342,6 +342,19 @@ func TestHandleMatrixBeaconInfoDoublePuppetEcho(t *testing.T) {
 	}
 }
 
+func liveLocationBeaconInfoEvent(sender id.UserID, eventID id.EventID, timestamp, timeout int64) *event.Event {
+	stateKey := sender.String()
+	return &event.Event{
+		Sender:   sender,
+		ID:       eventID,
+		Type:     event.StateUnstableBeaconInfo,
+		StateKey: &stateKey,
+		Content: event.Content{Parsed: &event.BeaconInfoEventContent{
+			Live: true, Description: "At the pub", Timestamp: timestamp, Timeout: timeout,
+		}},
+	}
+}
+
 func TestHandleMatrixBeaconKeepsBeaconInfoDeadline(t *testing.T) {
 	const own = id.UserID("@own:example.org")
 	ctx := context.Background()
@@ -372,6 +385,40 @@ func TestHandleMatrixBeaconKeepsBeaconInfoDeadline(t *testing.T) {
 	}
 	if updated.Sequence != share.Sequence+1 {
 		t.Errorf("sequence = %d, want %d", updated.Sequence, share.Sequence+1)
+	}
+}
+
+func TestHandleMatrixBeaconInfoIsOnlyDeadlineChange(t *testing.T) {
+	const own = id.UserID("@own:example.org")
+	ctx := context.Background()
+	wa, portal, _ := newLiveLocationTestClient(t, own)
+	share := liveLocationTestShare(t, wa, portal, own)
+	originalExpiry := share.Expiry
+
+	// A delayed beacon must not move the declared deadline.
+	lateBeacon := liveLocationBeaconEvent(own, false)
+	lateBeacon.Content.Parsed.(*event.BeaconEventContent).Timestamp = time.Now().Add(14 * time.Minute).UnixMilli()
+	if err := wa.HandleMatrixBeacon(ctx, portal, lateBeacon); err != nil {
+		t.Fatalf("HandleMatrixBeacon() error: %v", err)
+	}
+	afterBeacon := liveLocationTestShare(t, wa, portal, own)
+	if afterBeacon.Expiry != originalExpiry {
+		t.Fatalf("beacon changed expiry to %d, want %d", afterBeacon.Expiry, originalExpiry)
+	}
+
+	// A new beacon_info is the only event allowed to replace the deadline.
+	infoTimestamp := time.Now().Add(time.Minute).UnixMilli()
+	infoTimeout := int64(20 * time.Minute / time.Millisecond)
+	info := liveLocationBeaconInfoEvent(own, "$new-info", infoTimestamp, infoTimeout)
+	if err := wa.HandleMatrixBeaconInfo(ctx, portal, info); err != nil {
+		t.Fatalf("HandleMatrixBeaconInfo() error: %v", err)
+	}
+	updated := liveLocationTestShare(t, wa, portal, own)
+	if want := infoTimestamp + infoTimeout; updated.Expiry != want {
+		t.Errorf("expiry = %d, want %d from the new beacon_info", updated.Expiry, want)
+	}
+	if updated.WAMessageID != afterBeacon.WAMessageID || updated.Sequence != afterBeacon.Sequence {
+		t.Errorf("new beacon_info lost the WhatsApp session: message=%q sequence=%d", updated.WAMessageID, updated.Sequence)
 	}
 }
 
@@ -421,6 +468,43 @@ func TestProcessExpiredLiveLocationsStopsExpiredShare(t *testing.T) {
 	}
 	if remaining != nil {
 		t.Errorf("expired share was not deleted: %+v", remaining)
+	}
+}
+
+func TestProcessExpiredLiveLocationsAfterRestart(t *testing.T) {
+	// Deadline state lives only in the database, so a brand-new client with no
+	// in-memory timers must still send the final stop for a share that expired
+	// while the bridge was down.
+	const own = id.UserID("@own:example.org")
+	ctx := context.Background()
+	wa, portal, _ := newLiveLocationTestClient(t, own)
+	share := liveLocationTestShare(t, wa, portal, own)
+	share.Expiry = time.Now().Add(-time.Minute).UnixMilli()
+	if err := wa.Main.DB.LiveLocation.Put(ctx, share); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := &WhatsAppClient{
+		Main:      &WhatsAppConnector{DB: wa.Main.DB},
+		UserLogin: &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: wa.UserLogin.ID, UserMXID: own}},
+	}
+	var sent []*waE2E.Message
+	captureLiveLocationMessages(restarted, &sent)
+
+	restarted.processExpiredLiveLocations(ctx)
+	if len(sent) != 1 {
+		t.Fatalf("sent %d WhatsApp messages after restart, want 1", len(sent))
+	}
+	if stop := sent[0].GetLiveLocationMessage(); stop == nil || stop.GetSequenceNumber() != share.Sequence+1 {
+		t.Errorf("message is not the expected final stop: %+v", sent[0])
+	}
+	if remaining, err := wa.Main.DB.LiveLocation.GetAny(ctx, wa.UserLogin.ID, portal.PortalKey, wadb.LiveLocationToWhatsApp, own); err != nil || remaining != nil {
+		t.Errorf("expired share was not cleaned up: %v (row=%+v)", err, remaining)
+	}
+
+	restarted.processExpiredLiveLocations(ctx)
+	if len(sent) != 1 {
+		t.Errorf("second deadline check sent %d extra stops, want 0", len(sent)-1)
 	}
 }
 

@@ -269,6 +269,68 @@ func TestApplyLabelEvent(t *testing.T) {
 	}
 }
 
+func TestApplyLabelEventRetriesFailedCreation(t *testing.T) {
+	// A failed creation must leave nothing cached or saved, so retrying the
+	// same event invents a label again instead of sending a dangling
+	// association for a label WhatsApp never received.
+	chatJID := types.NewJID("15551234567", types.DefaultUserServer)
+	content := &LabelEventContent{Label: "Clients", Applied: true}
+	meta := &waid.UserLoginMetadata{Labels: map[string]waid.WALabel{}}
+	wa := &WhatsAppClient{}
+	var events []string
+	var sent []appstate.PatchInfo
+	saves := 0
+	createdIDs := []string{"FIRST-ID", "SECOND-ID"}
+	nextID := 0
+	newID := func() string {
+		id := createdIDs[nextID]
+		nextID++
+		return id
+	}
+	send := func(_ context.Context, patch appstate.PatchInfo) error {
+		sent = append(sent, patch)
+		if isLabelCreationPatch(patch) {
+			events = append(events, "create:"+labelPatchID(patch))
+			if len(sent) == 1 {
+				return errors.New("creation failed")
+			}
+			return nil
+		}
+		events = append(events, "associate:"+labelPatchID(patch))
+		return nil
+	}
+	save := func(_ context.Context) error {
+		saves++
+		events = append(events, "save")
+		return nil
+	}
+
+	if err := wa.applyLabelEvent(context.Background(), meta, chatJID, content, newID, send, save); err == nil {
+		t.Fatal("first attempt should report the creation failure")
+	}
+	if len(meta.Labels) != 0 || saves != 0 {
+		t.Fatalf("failed attempt cached %d labels and saved %d times, want 0 and 0", len(meta.Labels), saves)
+	}
+	if len(sent) != 1 || !isLabelCreationPatch(sent[0]) {
+		t.Fatalf("failed attempt sent %d patches, want only the creation patch", len(sent))
+	}
+
+	if err := wa.applyLabelEvent(context.Background(), meta, chatJID, content, newID, send, save); err != nil {
+		t.Fatalf("retry error: %v", err)
+	}
+	wantEvents := []string{"create:FIRST-ID", "create:SECOND-ID", "save", "associate:SECOND-ID"}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Errorf("events = %v, want %v", events, wantEvents)
+	}
+	if nextID != 2 {
+		t.Errorf("invented %d label IDs, want 2 (the retry must create a fresh label)", nextID)
+	}
+	wantLabels := map[string]waid.WALabel{"SECOND-ID": {Name: "Clients", Color: defaultLabelColor}}
+	if !reflect.DeepEqual(meta.Labels, wantLabels) {
+		t.Errorf("labels = %+v, want %+v", meta.Labels, wantLabels)
+	}
+}
+
 func TestApplyLabelEventSerializesConcurrentPortals(t *testing.T) {
 	const labelName = "Clients"
 	meta := &waid.UserLoginMetadata{}

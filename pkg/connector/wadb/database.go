@@ -10,12 +10,14 @@ import (
 
 type Database struct {
 	*dbutil.Database
-	Conversation *ConversationQuery
-	Message      *MessageQuery
-	PollOption   *PollOptionQuery
-	MediaRequest *MediaRequestQuery
-	HSNotif      *HistorySyncNotificationQuery
-	AvatarCache  *AvatarCacheQuery
+	Conversation            *ConversationQuery
+	Message                 *MessageQuery
+	PollOption              *PollOptionQuery
+	MediaRequest            *MediaRequestQuery
+	HSNotif                 *HistorySyncNotificationQuery
+	AvatarCache             *AvatarCacheQuery
+	LiveLocation            *LiveLocationQuery
+	LiveLocationSentMessage *LiveLocationSentMessageQuery
 }
 
 func New(bridgeID networkid.BridgeID, db *dbutil.Database, log zerolog.Logger) *Database {
@@ -49,6 +51,18 @@ func New(bridgeID networkid.BridgeID, db *dbutil.Database, log zerolog.Logger) *
 		AvatarCache: &AvatarCacheQuery{
 			QueryHelper: dbutil.MakeQueryHelper(db, func(_ *dbutil.QueryHelper[*AvatarCacheEntry]) *AvatarCacheEntry {
 				return &AvatarCacheEntry{}
+			}),
+		},
+		LiveLocation: &LiveLocationQuery{
+			BridgeID: bridgeID,
+			QueryHelper: dbutil.MakeQueryHelper(db, func(_ *dbutil.QueryHelper[*LiveLocationShare]) *LiveLocationShare {
+				return &LiveLocationShare{}
+			}),
+		},
+		LiveLocationSentMessage: &LiveLocationSentMessageQuery{
+			BridgeID: bridgeID,
+			QueryHelper: dbutil.MakeQueryHelper(db, func(_ *dbutil.QueryHelper[*LiveLocationSentMessage]) *LiveLocationSentMessage {
+				return &LiveLocationSentMessage{}
 			}),
 		},
 	}

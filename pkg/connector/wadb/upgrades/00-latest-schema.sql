@@ -1,4 +1,4 @@
--- v0 -> v12 (compatible with v3+): Latest revision
+-- v0 -> v14 (compatible with v3+): Latest revision
 
 CREATE TABLE whatsapp_poll_option_id (
     bridge_id TEXT  NOT NULL,
@@ -100,3 +100,34 @@ CREATE TABLE whatsapp_avatar_cache (
 
     PRIMARY KEY (entity_jid, avatar_id)
 );
+
+CREATE TABLE whatsapp_live_location (
+    bridge_id       TEXT    NOT NULL,
+    user_login_id   TEXT    NOT NULL,
+    portal_id       TEXT    NOT NULL,
+    portal_receiver TEXT    NOT NULL,
+    direction       INTEGER NOT NULL,
+    matrix_user_id  TEXT    NOT NULL,
+    info_event_id   TEXT    NOT NULL DEFAULT '',
+    description     TEXT    NOT NULL DEFAULT '',
+    timeout         BIGINT  NOT NULL DEFAULT 0,
+    started_ts      BIGINT  NOT NULL DEFAULT 0,
+    wa_message_id   TEXT    NOT NULL DEFAULT '',
+    sequence        BIGINT  NOT NULL DEFAULT 0,
+    expiry_ts       BIGINT  NOT NULL DEFAULT 0,
+
+    PRIMARY KEY (bridge_id, user_login_id, portal_id, portal_receiver, direction, matrix_user_id)
+);
+CREATE INDEX whatsapp_live_location_expiry_idx ON whatsapp_live_location (bridge_id, direction, expiry_ts);
+
+CREATE TABLE whatsapp_live_location_sent_message (
+    bridge_id       TEXT NOT NULL,
+    user_login_id   TEXT NOT NULL,
+    portal_id       TEXT NOT NULL,
+    portal_receiver TEXT NOT NULL,
+    matrix_user_id  TEXT NOT NULL,
+    wa_message_id   TEXT NOT NULL,
+
+    PRIMARY KEY (bridge_id, user_login_id, portal_id, portal_receiver, wa_message_id)
+);
+CREATE INDEX whatsapp_live_location_sent_message_portal_idx ON whatsapp_live_location_sent_message (bridge_id, portal_id, portal_receiver);

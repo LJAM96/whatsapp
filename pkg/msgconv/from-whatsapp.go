@@ -170,6 +170,8 @@ func (mc *MessageConverter) ToMatrix(
 		part, contextInfo = mc.convertListMessage(ctx, waMsg.ListMessage)
 	case waMsg.ListResponseMessage != nil:
 		part, contextInfo = mc.convertListResponseMessage(ctx, waMsg.ListResponseMessage)
+	case waMsg.ProductMessage != nil:
+		part, contextInfo = mc.convertProductMessage(ctx, info, waMsg.ProductMessage)
 	case waMsg.PollCreationMessage != nil:
 		part, contextInfo = mc.convertPollCreationMessage(ctx, waMsg.PollCreationMessage)
 	case waMsg.PollCreationMessageV2 != nil:
@@ -241,6 +243,11 @@ func (mc *MessageConverter) ToMatrix(
 	}
 	dbMeta := part.DBMetadata.(*waid.MessageMetadata)
 	dbMeta.SenderDeviceID = info.Sender.Device
+	if info.Chat.Server == types.NewsletterServer {
+		// Reactions to channel posts are sent against the server ID rather than
+		// the message ID (whatsmeow.Client.NewsletterSendReaction).
+		dbMeta.NewsletterServerID = info.ServerID
+	}
 	if info.IsIncomingBroadcast() {
 		dbMeta.BroadcastListJID = &info.Chat
 		if part.Extra == nil {
@@ -330,6 +337,9 @@ func (mc *MessageConverter) ToMatrix(
 			chat, _ = waid.ParsePortalID(portal.ID)
 		}
 		cm.ThreadRoot = ptr.Ptr(waid.MakeMessageID(chat, pcp, commentTarget.GetID()))
+	}
+	if getEditTargetID(ctx) == "" {
+		mc.applyStatus(cm, waMsg, info, intent)
 	}
 	return cm
 }

@@ -20,14 +20,20 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"math"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
+
+	"go.mau.fi/mautrix-whatsapp/pkg/connector/wadb"
 )
 
 const (
@@ -67,6 +73,93 @@ func liveLocationGeoURI(lat, long float64, accuracy uint32) string {
 	return uri
 }
 
+// parseBeaconUncertainty parses an RFC 5870 uncertainty radius (uval) and
+// rounds it to the integer meter accuracy used by WhatsApp. The uval grammar
+// is a nonnegative decimal: 1*DIGIT ["." 1*DIGIT], so signs, exponents,
+// empty values and malformed decimals are rejected rather than forwarded.
+func parseBeaconUncertainty(value string) (uint32, error) {
+	isDigits := func(s string) bool {
+		if s == "" {
+			return false
+		}
+		for _, r := range s {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	whole, frac, hasDot := strings.Cut(value, ".")
+	if !isDigits(whole) || (hasDot && !isDigits(frac)) {
+		return 0, fmt.Errorf("location accuracy is not a number: %q", value)
+	}
+	parsed, parseErr := strconv.ParseFloat(value, 64)
+	if parseErr != nil {
+		return 0, fmt.Errorf("location accuracy is not a number: %w", parseErr)
+	}
+	rounded := math.Round(parsed)
+	if rounded > math.MaxUint32 {
+		return 0, fmt.Errorf("location accuracy is too large: %q", value)
+	}
+	return uint32(rounded), nil
+}
+
+// parseBeaconGeoURI parses an MSC3488 geo URI into coordinates and the
+// optional uncertainty radius, which maps to WhatsApp's accuracy in meters.
+func parseBeaconGeoURI(uri string) (lat, long float64, accuracy uint32, err error) {
+	lat, long, err = parseGeoURI(uri)
+	if err != nil {
+		return
+	}
+	for _, param := range strings.Split(uri, ";") {
+		key, value, ok := strings.Cut(param, "=")
+		if !ok || key != "u" {
+			continue
+		}
+		accuracy, err = parseBeaconUncertainty(value)
+		if err != nil {
+			return
+		}
+	}
+	return
+}
+
+// BeaconToLiveLocationMessage converts an m.beacon to a WhatsApp live location
+// message. sequence is 1 for the first beacon of a share and increases for
+// every update; the description is only sent on the first message, with later
+// updates carrying just the new position, accuracy and sequence.
+func BeaconToLiveLocationMessage(beacon *event.BeaconEventContent, description string, sequence int64) (*waE2E.Message, error) {
+	location := beacon.GetLocation()
+	if location == nil {
+		return nil, fmt.Errorf("beacon has no location")
+	}
+	lat, long, accuracy, err := parseBeaconGeoURI(location.URI)
+	if err != nil {
+		return nil, err
+	}
+	msg := &waE2E.LiveLocationMessage{
+		DegreesLatitude:  &lat,
+		DegreesLongitude: &long,
+		SequenceNumber:   &sequence,
+	}
+	if accuracy > 0 {
+		msg.AccuracyInMeters = &accuracy
+	}
+	if sequence == 1 && description != "" {
+		msg.Caption = &description
+	}
+	return &waE2E.Message{LiveLocationMessage: msg}, nil
+}
+
+// LiveLocationStopMessage builds the final WhatsApp live location message. A
+// live location without coordinates and with the next sequence number tells
+// WhatsApp the share has ended.
+func LiveLocationStopMessage(sequence int64) *waE2E.Message {
+	return &waE2E.Message{LiveLocationMessage: &waE2E.LiveLocationMessage{
+		SequenceNumber: &sequence,
+	}}
+}
+
 func liveLocationDescription(msg *waE2E.LiveLocationMessage) string {
 	if caption := msg.GetCaption(); caption != "" {
 		return caption
@@ -75,14 +168,10 @@ func liveLocationDescription(msg *waE2E.LiveLocationMessage) string {
 }
 
 // liveLocationShare is the state needed to anchor further beacons to the
-// beacon_info event sent when sharing started.
+// beacon_info event sent when a WhatsApp share started.
 type liveLocationShare struct {
 	InfoEventID id.EventID
 	Info        event.BeaconInfoEventContent
-}
-
-func liveLocationShareKey(portal *bridgev2.Portal, intent bridgev2.MatrixAPI) string {
-	return portal.MXID.String() + "\x00" + intent.GetMXID().String()
 }
 
 // liveLocationShareActive reports whether a beacon_info can still anchor new
@@ -97,8 +186,7 @@ func liveLocationShareActive(info event.BeaconInfoEventContent) bool {
 }
 
 // recoverLiveLocationShare reads an active share from the room state. This is
-// needed after a bridge restart, when the in-memory map is empty. A stopped or
-// expired beacon_info is ignored so a fresh start doesn't get attached to it.
+// used as a fallback after a bridge restart if the database has no row yet.
 func recoverLiveLocationShare(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) *liveLocationShare {
 	stateAPI, ok := intent.(bridgev2.MatrixAPIWithArbitraryRoomState)
 	if !ok {
@@ -119,27 +207,58 @@ func recoverLiveLocationShare(ctx context.Context, portal *bridgev2.Portal, inte
 	return &liveLocationShare{InfoEventID: stateEvt.ID, Info: *info}
 }
 
+// shareFromDB converts a durable share row into the beacon anchor used by the
+// converter. Get drops expired rows, so any row reaching here is still live.
+func shareFromDB(row *wadb.LiveLocationShare) *liveLocationShare {
+	return &liveLocationShare{
+		InfoEventID: row.InfoEventID,
+		Info: event.BeaconInfoEventContent{
+			Live:        true,
+			Timeout:     row.Timeout,
+			Timestamp:   row.StartedTS,
+			Description: row.Description,
+			Asset:       &event.BeaconAsset{Type: event.LocationAssetTypeSelf},
+		},
+	}
+}
+
 func (mc *MessageConverter) getLiveLocationShare(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) *liveLocationShare {
-	key := liveLocationShareKey(portal, intent)
-	mc.liveLocationLock.Lock()
-	share := mc.liveLocations[key]
-	if share != nil && !liveLocationShareActive(share.Info) {
-		// An expired cached share must not anchor new beacons. Drop it so the
-		// caller starts a fresh beacon_info and keeps the m.location fallback.
-		delete(mc.liveLocations, key)
-		share = nil
+	row, err := mc.DB.LiveLocation.Get(ctx, "", portal.PortalKey, wadb.LiveLocationFromWhatsApp, intent.GetMXID())
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to get live location share from database")
 	}
-	mc.liveLocationLock.Unlock()
-	if share != nil {
-		return share
+	if row != nil {
+		return shareFromDB(row)
 	}
-	share = recoverLiveLocationShare(ctx, portal, intent)
+	share := recoverLiveLocationShare(ctx, portal, intent)
 	if share != nil {
-		mc.liveLocationLock.Lock()
-		mc.liveLocations[key] = share
-		mc.liveLocationLock.Unlock()
+		mc.putLiveLocationShare(ctx, portal, intent, share)
 	}
 	return share
+}
+
+func (mc *MessageConverter) putLiveLocationShare(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, share *liveLocationShare) {
+	err := mc.DB.LiveLocation.Put(ctx, &wadb.LiveLocationShare{
+		UserLoginID:  networkid.UserLoginID(""),
+		PortalKey:    portal.PortalKey,
+		Direction:    wadb.LiveLocationFromWhatsApp,
+		MatrixUserID: intent.GetMXID(),
+		InfoEventID:  share.InfoEventID,
+		Description:  share.Info.Description,
+		Timeout:      share.Info.Timeout,
+		StartedTS:    share.Info.GetTimestamp(),
+		Expiry:       share.Info.GetTimestamp() + share.Info.Timeout,
+	})
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to save live location share to database")
+	}
+}
+
+func (mc *MessageConverter) deleteLiveLocationShare(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) {
+	err := mc.DB.LiveLocation.Delete(ctx, "", portal.PortalKey, wadb.LiveLocationFromWhatsApp, intent.GetMXID())
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to delete live location share from database")
+	}
 }
 
 func (mc *MessageConverter) sendLiveLocationBeacon(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI, msg *waE2E.LiveLocationMessage, info *types.MessageInfo, share *liveLocationShare) {
@@ -164,19 +283,20 @@ func (mc *MessageConverter) startLiveLocationBeacon(ctx context.Context, portal 
 		return
 	}
 	share := &liveLocationShare{InfoEventID: resp.EventID, Info: *content}
-	mc.liveLocationLock.Lock()
-	mc.liveLocations[liveLocationShareKey(portal, intent)] = share
-	mc.liveLocationLock.Unlock()
+	mc.putLiveLocationShare(ctx, portal, intent, share)
 	mc.sendLiveLocationBeacon(ctx, portal, intent, msg, info, share)
 }
 
 func (mc *MessageConverter) stopLiveLocationBeacon(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) {
-	key := liveLocationShareKey(portal, intent)
-	mc.liveLocationLock.Lock()
-	share := mc.liveLocations[key]
-	delete(mc.liveLocations, key)
-	mc.liveLocationLock.Unlock()
-	if share == nil {
+	row, err := mc.DB.LiveLocation.Get(ctx, "", portal.PortalKey, wadb.LiveLocationFromWhatsApp, intent.GetMXID())
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to get live location share from database")
+	}
+	mc.deleteLiveLocationShare(ctx, portal, intent)
+	var share *liveLocationShare
+	if row != nil {
+		share = shareFromDB(row)
+	} else {
 		// Don't re-cache the recovered share here: a later start must be able
 		// to create a fresh beacon_info event.
 		share = recoverLiveLocationShare(ctx, portal, intent)
@@ -186,7 +306,7 @@ func (mc *MessageConverter) stopLiveLocationBeacon(ctx context.Context, portal *
 	}
 	stopped := share.Info
 	stopped.Live = false
-	_, err := mc.Bridge.Bot.SendState(ctx, portal.MXID, event.StateUnstableBeaconInfo, intent.GetMXID().String(), &event.Content{Parsed: &stopped}, time.Now())
+	_, err = mc.Bridge.Bot.SendState(ctx, portal.MXID, event.StateUnstableBeaconInfo, intent.GetMXID().String(), &event.Content{Parsed: &stopped}, time.Now())
 	if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to mark live location beacon_info as stopped")
 	}
@@ -198,6 +318,36 @@ func noBridgePart() *bridgev2.ConvertedMessagePart {
 		Content:    &event.MessageEventContent{MsgType: event.MsgNotice, Body: "Live location update"},
 		DontBridge: true,
 	}
+}
+
+// isWeaveLiveLocationEcho reports whether a from-me live location message is
+// the echo of a message the bridge sent to WhatsApp for a Weave-originated
+// share. Every ID we send (start, each update and the final stop) is recorded
+// in the sent-message table, so a direct ID match is enough. WhatsApp updates
+// may also reference the original share message through contextInfo.stanza_id,
+// so that ID is checked too. Bridging such an echo would create a loop: it
+// would be sent back to Matrix under the user's own MXID and then picked up by
+// the Matrix-to-WhatsApp live location handler.
+func (mc *MessageConverter) isWeaveLiveLocationEcho(ctx context.Context, portal *bridgev2.Portal, msg *waE2E.LiveLocationMessage, info *types.MessageInfo) bool {
+	if mc.DB == nil || mc.DB.LiveLocationSentMessage == nil || info == nil {
+		return false
+	}
+	queries := mc.DB.LiveLocationSentMessage
+	if exists, err := queries.Exists(ctx, portal.PortalKey, string(info.ID)); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("message_id", string(info.ID)).
+			Msg("Failed to check if live location message is an echo")
+	} else if exists {
+		return true
+	}
+	if stanzaID := msg.GetContextInfo().GetStanzaID(); stanzaID != "" {
+		if exists, err := queries.Exists(ctx, portal.PortalKey, stanzaID); err != nil {
+			zerolog.Ctx(ctx).Warn().Err(err).Str("stanza_id", stanzaID).
+				Msg("Failed to check if live location update references an echo")
+		} else if exists {
+			return true
+		}
+	}
+	return false
 }
 
 // convertLiveLocationMessage bridges WhatsApp live location messages to MSC3489
@@ -213,6 +363,12 @@ func (mc *MessageConverter) convertLiveLocationMessage(
 	info *types.MessageInfo,
 	isBackfill bool,
 ) (*bridgev2.ConvertedMessagePart, *waE2E.ContextInfo) {
+	if info.IsFromMe && mc.isWeaveLiveLocationEcho(ctx, portal, msg, info) {
+		zerolog.Ctx(ctx).Debug().
+			Str("message_id", string(info.ID)).
+			Msg("Ignoring echo of a live location message sent by the bridge")
+		return noBridgePart(), msg.GetContextInfo()
+	}
 	if msg.DegreesLatitude == nil || msg.DegreesLongitude == nil {
 		if !isBackfill {
 			mc.stopLiveLocationBeacon(ctx, portal, intent)

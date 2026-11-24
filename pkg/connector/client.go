@@ -29,6 +29,7 @@ import (
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/appstate"
 	waBinary "go.mau.fi/whatsmeow/binary"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waWa6"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
@@ -64,6 +65,7 @@ func (wa *WhatsAppConnector) LoadUserLogin(ctx context.Context, login *bridgev2.
 
 		disableNewsletter: store.BaseClientPayload.GetUserAgent().GetPlatform() == waWa6.ClientPayload_UserAgent_MACOS,
 	}
+	w.recording = newRecordingPresence(w, realRecordingClock{})
 	login.Client = w
 
 	loginMetadata := login.Metadata.(*waid.UserLoginMetadata)
@@ -131,9 +133,18 @@ type WhatsAppClient struct {
 	pushNamesSynced    *exsync.Event
 	lastPresence       types.Presence
 	presenceSubs       *exsync.Set[types.JID]
+	recording          *recordingPresence
 	blocklistLock      sync.Mutex
 	starredLock        sync.Mutex
 	labelLock          sync.Mutex
+	outboundLabelLock  sync.Mutex
+
+	// liveLocationLock serializes the whole read/send/write sequence for an
+	// outgoing share of a portal. Both Matrix handlers and expiry processing
+	// hold it, so a stop cannot delete a row an in-flight update replaces (or
+	// race an update that would resurrect a stopped row). Keying by portal
+	// lets unrelated portals send concurrently.
+	liveLocationLock exsync.KeyedMutex[networkid.PortalKey]
 
 	callNoticeLock sync.Mutex
 	callNotices    map[string]*trackedCall
@@ -152,6 +163,10 @@ type WhatsAppClient struct {
 
 	previousOwnLIDs     *exsync.Set[types.JID]
 	previousOwnLIDsLock sync.Mutex
+
+	// sendLiveLocationHook is only set by tests to observe outgoing live
+	// location messages without needing a connected WhatsApp client.
+	sendLiveLocationHook func(ctx context.Context, portal *bridgev2.Portal, msg *waE2E.Message) (types.MessageID, error)
 }
 
 var (
@@ -407,6 +422,7 @@ func (wa *WhatsAppClient) startLoops() {
 	ctx = wa.UserLogin.Log.WithContext(ctx)
 	go wa.historySyncLoop(ctx)
 	go wa.ghostResyncLoop(ctx)
+	go wa.liveLocationExpiryLoop(ctx)
 	if mrc := wa.Main.Config.HistorySync.MediaRequests; mrc.AutoRequestMedia && mrc.RequestMethod == MediaRequestMethodLocalTime {
 		go wa.mediaRequestLoop(ctx)
 	}

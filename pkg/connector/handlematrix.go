@@ -158,12 +158,27 @@ func (wa *WhatsAppClient) handleConvertedMatrixMessage(ctx context.Context, msg 
 			SenderID:  waid.MakeUserID(resp.Sender),
 			Timestamp: resp.Timestamp,
 			Metadata: &waid.MessageMetadata{
-				SenderDeviceID: wa.JID.Device,
+				SenderDeviceID:     wa.JID.Device,
+				NewsletterServerID: resp.ServerID,
 			},
 		},
 		StreamOrder:   resp.Timestamp.Unix(),
 		RemovePending: networkid.TransactionID(pickedMessageID),
 	}, nil
+}
+
+// getNewsletterServerID extracts the server ID that whatsmeow needs to react to
+// a channel post. It may be stored on either the post's or the reaction's DB
+// metadata depending on which direction was bridged first.
+func getNewsletterServerID(meta any) (types.MessageServerID, bool) {
+	switch m := meta.(type) {
+	case *waid.MessageMetadata:
+		return m.NewsletterServerID, m.NewsletterServerID != 0
+	case *waid.ReactionMetadata:
+		return m.NewsletterServerID, m.NewsletterServerID != 0
+	default:
+		return 0, false
+	}
 }
 
 func (wa *WhatsAppClient) PreHandleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (bridgev2.MatrixReactionPreResponse, error) {
@@ -194,6 +209,22 @@ func (wa *WhatsAppClient) HandleMatrixReaction(ctx context.Context, msg *bridgev
 	portalJID, err := waid.ParsePortalID(msg.Portal.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse portal ID: %w", err)
+	}
+	if portalJID.Server == types.NewsletterServer {
+		serverID, ok := getNewsletterServerID(msg.TargetMessage.Metadata)
+		if !ok {
+			return nil, fmt.Errorf("can't react to channel post without a server ID")
+		}
+		defer wa.mcTrack(msg, time.Now(), &retErr)
+		// whatsmeow requires the server ID of the post for channel reactions;
+		// a plain reaction message sent with SendMessage is not accepted.
+		err = wa.Client.NewsletterSendReaction(ctx, portalJID, serverID, msg.PreHandleResp.Emoji, "")
+		return &database.Reaction{
+			Metadata: &waid.ReactionMetadata{
+				SenderDeviceID:     wa.JID.Device,
+				NewsletterServerID: serverID,
+			},
+		}, wa.wrapSendError(err)
 	}
 	// Reactions with the RSVP emojis on an event message are sent as WhatsApp
 	// event responses instead of plain reactions (upstream mautrix/whatsapp#803).
@@ -256,6 +287,25 @@ func (wa *WhatsAppClient) HandleMatrixReactionRemove(ctx context.Context, msg *b
 	portalJID, err := waid.ParsePortalID(msg.Portal.ID)
 	if err != nil {
 		return fmt.Errorf("failed to parse portal ID: %w", err)
+	}
+	if portalJID.Server == types.NewsletterServer {
+		serverID, ok := getNewsletterServerID(msg.TargetReaction.Metadata)
+		if !ok {
+			// Reactions bridged before the server ID was stored don't have it in
+			// the reaction metadata, so fall back to the target post's metadata.
+			target, err := wa.Main.Bridge.DB.Message.GetFirstPartByID(ctx, wa.UserLogin.ID, messageID.String())
+			if err != nil {
+				return fmt.Errorf("failed to get target message for channel reaction removal: %w", err)
+			} else if target != nil {
+				serverID, ok = getNewsletterServerID(target.Metadata)
+			}
+		}
+		if !ok {
+			return fmt.Errorf("can't remove reaction to channel post without a server ID")
+		}
+		defer wa.mcTrack(msg, time.Now(), &retErr)
+		err = wa.Client.NewsletterSendReaction(ctx, portalJID, serverID, "", "")
+		return wa.wrapSendError(err)
 	}
 	if meta, ok := msg.TargetReaction.Metadata.(*waid.ReactionMetadata); ok && meta.IsEventResponse {
 		// WhatsApp has no "remove RSVP" response, so there is nothing to send.
@@ -357,6 +407,9 @@ func (wa *WhatsAppClient) HandleMatrixReadReceipt(ctx context.Context, receipt *
 	portalJID, err := waid.ParsePortalID(receipt.Portal.ID)
 	if err != nil {
 		return fmt.Errorf("failed to parse portal ID: %w", err)
+	}
+	if skipStatusReceipt(portalJID, receipt.Implicit) {
+		return nil
 	}
 	messages, err := receipt.Portal.Bridge.DB.Message.GetMessagesBetweenTimeQuery(ctx, receipt.Portal.PortalKey, receipt.LastRead, receipt.ReadUpTo)
 	if err != nil {
